@@ -18,6 +18,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:5000")
 
 def send_message(to: str, text: str):
+    print(f"Preparing to send message to {to}: {text}")
     if not text:
         print("Error: Message text is empty.")
         return
@@ -123,6 +124,7 @@ async def llm_reply_to_text_v2(user_input: str, user_phone: str, media_id: str =
         print("LLM API response:", response_data)
         if response.status_code == 200 and response_data.get("error") is None:
             message_content = response_data.get("response")
+            print(f"LLM API message content: {message_content}")
             if message_content:
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content}")

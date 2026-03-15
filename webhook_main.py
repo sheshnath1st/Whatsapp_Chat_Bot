@@ -37,7 +37,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     message_data = WhatsAppMessage(**data)
     
     change = message_data.entry[0]["changes"][0]["value"]
-    print(change)
+    print(f"Webhook change: {change}")
     if 'messages' in change:
         message = change["messages"][-1]
         user_phone = message["from"]
