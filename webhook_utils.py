@@ -11,7 +11,7 @@ load_dotenv()
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
-MEDIA_URL = "https://graph.facebook.com/v20.0/{media_id}"
+MEDIA_URL = "https://graph.facebook.com/v19.0/{media_id}"
 BASE_URL = os.getenv("BASE_URL")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
