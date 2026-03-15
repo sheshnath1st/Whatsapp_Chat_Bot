@@ -1,0 +1,50 @@
+{
+  "info": {
+    "_postman_id": "b1e2c3d4-5678-1234-9abc-def012345678",
+    "name": "WhatsApp Llama4 Bot Local Test",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Webhook Verification (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/webhook?hub.mode=subscribe&hub.verify_token=YOUR_VERIFY_TOKEN&hub.challenge=12345",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8000",
+          "path": ["webhook"],
+          "query": [
+            {"key": "hub.mode", "value": "subscribe"},
+            {"key": "hub.verify_token", "value": "YOUR_VERIFY_TOKEN"},
+            {"key": "hub.challenge", "value": "12345"}
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Send WhatsApp Text Message (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"WHATSAPP_BUSINESS_ACCOUNT_ID\",\n      \"changes\": [\n        {\n          \"value\": {\n            \"messages\": [\n              {\n                \"from\": \"SENDER_PHONE_NUMBER\",\n                \"id\": \"wamid.ID\",\n                \"timestamp\": \"TIMESTAMP\",\n                \"text\": {\n                  \"body\": \"Hello bot!\"\n                },\n                \"type\": \"text\"\n              }\n            ]\n          },\n          \"field\": \"messages\"\n        }\n      ]\n    }\n  ]\n}\n"
+        },
+        "url": {
+          "raw": "http://localhost:8000/webhook",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8000",
+          "path": ["webhook"]
+        }
+      },
+      "response": []
+    }
+  ]
+}
