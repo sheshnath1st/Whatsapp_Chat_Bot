@@ -33,7 +33,9 @@ def send_message(to: str, text: str):
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-
+    print(f"Send URL WHATSAPP_API_URL: {WHATSAPP_API_URL}")
+    print(f"Send URL headers: {headers}")
+    print(f"Send URL payload: {payload}")
     response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload)
     if response.status_code == 200:
         print("Message sent")
@@ -123,6 +125,7 @@ async def llm_reply_to_text_v2(user_input: str, user_phone: str, media_id: str =
             message_content = response_data.get("response")
             if message_content:
                 loop = asyncio.get_running_loop()
+                print(f"Sending message to {user_phone}: {message_content}")
                 await loop.run_in_executor(None, send_message, user_phone, message_content)
             else:
                 print("Error: Empty message content from LLM API")
