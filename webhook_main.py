@@ -33,6 +33,7 @@ async def verify_webhook(request: Request):
 @app.post("/webhook")
 async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
+    print("Received webhook data:", data)
     message_data = WhatsAppMessage(**data)
     
     change = message_data.entry[0]["changes"][0]["value"]
