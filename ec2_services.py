@@ -61,7 +61,7 @@ def speech_to_text(input_path: str) -> str:
     client = Groq(api_key=GROQ_API_KEY)
     with open(input_path, "rb") as file:
         transcription = client.audio.transcriptions.create(
-            model="distil-whisper-large-v3-en",
+            model="whisper-large-v3-turbo",
             response_format="verbose_json",
             file=(input_path, file.read())
         )
