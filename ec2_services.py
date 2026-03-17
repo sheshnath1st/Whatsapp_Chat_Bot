@@ -19,7 +19,7 @@ WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 
 def text_to_speech(text: str, output_path: str = "reply.mp3") -> str:
     """
-    Synthesizes a given text into an audio file using Groq's TTS service.
+    Synthesizes a given text into an audio file using OpenAI's TTS service.
 
     Args:
         text (str): The text to be synthesized.
@@ -29,11 +29,10 @@ def text_to_speech(text: str, output_path: str = "reply.mp3") -> str:
         str: The path to the output audio file, or None if the synthesis failed.
     """
     try:
-        client = Groq(api_key=GROQ_API_KEY)
+        client = OpenAI()
         response = client.audio.speech.create(
-            model="playai-tts",
-            voice="Aaliyah-PlayAI",
-            response_format="mp3",
+            model="tts-1-hd",
+            voice="alloy",
             input=text
         )
         
