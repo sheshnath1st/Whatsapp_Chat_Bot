@@ -13,6 +13,7 @@ load_dotenv()
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
@@ -74,7 +75,7 @@ def speech_to_text(input_path: str) -> str:
 
 def get_llm_response(text_input: str, image_input : str = None) -> str:
     """
-    Get the response from the Together AI LLM given a text input and an optional image input.
+    Get the response from the LLM given a text input and an optional image input.
 
     Args:
         text_input (str): The text to be sent to the LLM.
@@ -83,36 +84,48 @@ def get_llm_response(text_input: str, image_input : str = None) -> str:
     Returns:
         str: The response from the LLM.
     """
-    messages = []
-    # print(bool(image_input))
-    if image_input:
-        messages.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{image_input}"}
-        })
-    messages.append({
-        "type": "text",
-        "text": text_input
-    })
     try:
-        # client = Together(api_key=TOGETHER_API_KEY)
-        # client = OpenAI(api_key=LLAMA_API_KEY, base_url="https://api.llama.com/compat/v1/")
-        client = Groq(api_key=GROQ_API_KEY)
-        completion = client.chat.completions.create(
-            # model="Llama-4-Maverick-17B-128E-Instruct-FP8",
-            model="llama-3.1-8b-instant",
-            messages=[
+        if image_input:
+            # Use OpenAI GPT-4 Vision for image processing
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            messages = [
                 {
                     "role": "user",
-                    "content": messages
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text_input
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_input}"
+                            }
+                        }
+                    ]
                 }
             ]
-        )
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages
+            )
+        else:
+            # Use Groq for text-only responses
+            client = Groq(api_key=GROQ_API_KEY)
+            completion = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": text_input
+                    }
+                ]
+            )
         
         if completion.choices and len(completion.choices) > 0:
             return completion.choices[0].message.content
         else:
-            print("Empty response from Together API")
+            print("Empty response from LLM API")
             return None
     except Exception as e:
         print(f"LLM error: {e}")
