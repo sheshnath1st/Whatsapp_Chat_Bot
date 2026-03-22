@@ -1,9 +1,14 @@
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from ec2_services import text_to_speech, get_llm_response, handle_image_message,handle_audio_message,send_audio_message
+from ec2_services import (
+    get_llm_response,
+    handle_image_message,
+    handle_audio_message,
+    extract_business_card_details,
+)
 from enum import Enum
 
 import logging
@@ -14,6 +19,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+EXTRACTION_FAILED_MSG = "Unable to extract business card details"
 
 app = FastAPI()
 
@@ -31,12 +37,13 @@ class TextToSpeechRequest(BaseModel):
     output_path: Optional[str] = "reply.mp3"
 
 class TextToSpeechResponse(BaseModel):
-    file_path: Optional[str]
+    file_path: Optional[str] = None
     error: Optional[str] = None
 
 class KindEnum(str, Enum):
     audio = "audio"
     image = "image"
+    contact = "contact"
 
 class LLMRequest(BaseModel):
     user_input: str
@@ -45,7 +52,7 @@ class LLMRequest(BaseModel):
 
 
 class LLMResponse(BaseModel):
-    response: Optional[str]
+    response: Optional[str] = None
     error: Optional[str] = None
 
 @app.post("/llm-response")
@@ -63,34 +70,61 @@ async def api_llm_response(req: LLMRequest):
 
         if req.kind == KindEnum.image:
 
-            logger.info("Processing image message")
+            logger.info("Input type detected: image")
 
             image_base64 = await handle_image_message(req.media_id)
 
-            logger.info("Image fetched and converted to base64")
+            logger.info("Image fetched and converted to base64 for extraction")
 
-            result = get_llm_response(text_message, image_input=image_base64)
+            result = extract_business_card_details(image_base64=image_base64)
 
-            logger.info(f"LLM response: {result}")
+            if result is None:
+                logger.error("Business card extraction failed for image")
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": EXTRACTION_FAILED_MSG},
+                )
+
+            logger.info(f"Business card extracted JSON: {result}")
+            return {"response": result, "error": None}
 
 
         elif req.kind == KindEnum.audio:
 
-            logger.info("Processing audio message")
+            logger.info("Input type detected: audio")
 
             text_message = await handle_audio_message(req.media_id)
 
-            logger.info(f"Transcribed audio text: {text_message}")
+            logger.info(f"Transcription: {text_message}")
 
-            result = get_llm_response(text_message)
+            result = extract_business_card_details(input_text=text_message)
 
-            logger.info(f"LLM response: {result}")
+            if result is None:
+                logger.error("Business card extraction failed for audio")
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": EXTRACTION_FAILED_MSG},
+                )
 
-            audio_path = text_to_speech(text=result, output_path="reply.mp3")
+            logger.info(f"Business card extracted JSON: {result}")
+            return {"response": result, "error": None}
 
-            logger.info(f"TTS generated audio file: {audio_path}")
+        elif req.kind == KindEnum.contact:
 
-            return FileResponse(audio_path, media_type="audio/mpeg", filename="reply.mp3")
+            logger.info("Input type detected: contact")
+
+            result = extract_business_card_details(input_text=text_message)
+
+            if result is None:
+                logger.error("Business card extraction failed for contact")
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": EXTRACTION_FAILED_MSG},
+                )
+
+            logger.info(f"Business card extracted JSON: {result}")
+            return {"response": result, "error": None}
+
 
 
         else:
