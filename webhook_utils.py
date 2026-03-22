@@ -1,6 +1,7 @@
 import os
 import asyncio
 import tempfile
+import json
 import requests
 import httpx
 from dotenv import load_dotenv
@@ -124,6 +125,8 @@ async def llm_reply_to_text_v2(user_input: str, user_phone: str, media_id: str =
         print("LLM API response:", response_data)
         if response.status_code == 200 and response_data.get("error") is None:
             message_content = response_data.get("response")
+            if isinstance(message_content, dict):
+                message_content = json.dumps(message_content, ensure_ascii=False)
             print(f"LLM API message content: {message_content}")
             if message_content:
                 loop = asyncio.get_running_loop()
