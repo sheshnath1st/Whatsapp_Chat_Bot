@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Optional
 from groq import Groq
 
+try:
+    import whisper
+except Exception:
+    whisper = None
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,8 @@ WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "groq").lower()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 GROQ_MODEL = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
+BUSINESS_CARD_PYTHON_FIRST = (os.getenv("BUSINESS_CARD_PYTHON_FIRST") or "true").lower() == "true"
+BUSINESS_CARD_MIN_FIELDS = int(os.getenv("BUSINESS_CARD_MIN_FIELDS") or 3)
 
 BUSINESS_CARD_SCHEMA = {
     "name": None,
@@ -115,6 +122,100 @@ def _call_text_llm(messages: list[dict]) -> str | None:
         return None
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{2,5}\)?[\s-]?)?\d{3,5}[\s-]?\d{3,6}")
+_WEB_RE = re.compile(r"(?:https?://)?(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/\S*)?")
+_DESIGNATION_HINTS = (
+    "manager",
+    "director",
+    "engineer",
+    "developer",
+    "consultant",
+    "architect",
+    "officer",
+    "founder",
+    "ceo",
+    "cto",
+    "coo",
+    "president",
+    "lead",
+    "head",
+    "sales",
+    "marketing",
+)
+_COMPANY_HINTS = ("ltd", "limited", "pvt", "inc", "llp", "technologies", "solutions", "corp", "company")
+
+
+def _populated_field_count(data: dict) -> int:
+    return sum(1 for value in data.values() if value not in (None, ""))
+
+
+def _python_extract_from_text(text: str) -> dict:
+    """Heuristic field extraction from OCR/transcribed text without calling an LLM."""
+    if not text:
+        return dict(BUSINESS_CARD_SCHEMA)
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return dict(BUSINESS_CARD_SCHEMA)
+
+    emails = _EMAIL_RE.findall(text)
+    websites = [w for w in _WEB_RE.findall(text) if "." in w and "@" not in w]
+    phones = _PHONE_RE.findall(text)
+
+    designation = next((l for l in lines if any(h in l.lower() for h in _DESIGNATION_HINTS)), None)
+    company = next((l for l in lines if any(h in l.lower() for h in _COMPANY_HINTS)), None)
+
+    name = None
+    for line in lines[:6]:
+        # Prefer short alphabetic top lines that do not look like contact info.
+        if any(token in line.lower() for token in ("@", "www", "http", "+", "tel", "phone")):
+            continue
+        if len(line.split()) <= 4 and re.search(r"[A-Za-z]", line):
+            name = line
+            break
+
+    address_lines = [
+        l for l in lines
+        if any(k in l.lower() for k in ("road", "rd", "street", "st", "avenue", "ave", "floor", "near", "city", "state", "india", "pin"))
+    ]
+
+    extracted = {
+        "name": name,
+        "designation": designation,
+        "company": company,
+        "phone": ", ".join(dict.fromkeys(p.strip() for p in phones if len(re.sub(r"\D", "", p)) >= 8)) or None,
+        "email": emails[0] if emails else None,
+        "website": websites[0] if websites else None,
+        "address": ", ".join(address_lines) if address_lines else None,
+    }
+    return _normalize_business_card_schema(extracted)
+
+
+def _python_extract_from_image(image_base64: str) -> dict | None:
+    """Run local OCR + regex extraction. Returns None when OCR is unavailable/fails."""
+    if not image_base64:
+        return None
+
+    try:
+        import pytesseract
+    except Exception:
+        logger.info("Python-first OCR skipped: pytesseract is not installed.")
+        return None
+
+    try:
+        # Accept both raw base64 and data URL input.
+        image_payload = image_base64.split(",", 1)[-1] if "base64," in image_base64 else image_base64
+        image_bytes = base64.b64decode(image_payload)
+        image = Image.open(BytesIO(image_bytes)).convert("L")
+        ocr_text = pytesseract.image_to_string(image)
+        logger.info("Python OCR text (first 400 chars): %s", ocr_text[:400])
+        return _python_extract_from_text(ocr_text)
+    except Exception as e:
+        logger.exception("Python-first OCR extraction failed: %s", e)
+        return None
+
+
 def extract_business_card_details(input_text: str = None, image_base64: str = None) -> dict | None:
     """
     Extract structured business card fields from text or image.
@@ -136,6 +237,21 @@ def extract_business_card_details(input_text: str = None, image_base64: str = No
     try:
         if image_base64:
             logger.info("Business card extraction input type: image")
+            if BUSINESS_CARD_PYTHON_FIRST:
+                python_result = _python_extract_from_image(image_base64)
+                if python_result:
+                    populated = _populated_field_count(python_result)
+                    logger.info(
+                        "Python-first image extraction fields=%d threshold=%d payload=%s",
+                        populated,
+                        BUSINESS_CARD_MIN_FIELDS,
+                        python_result,
+                    )
+                    if populated >= BUSINESS_CARD_MIN_FIELDS:
+                        return python_result
+
+                logger.info("Python-first image extraction insufficient, falling back to AI vision")
+
             # Vision extraction uses OpenAI because current Groq path in this project is text-only.
             client = OpenAI(api_key=OPENAI_API_KEY)
             messages = [
@@ -212,26 +328,66 @@ def text_to_speech(text: str, output_path: str = "reply.mp3") -> Optional[str]:
 
 def speech_to_text(input_path: str) -> str:
     """
-    Transcribe an audio file using Groq.
-
-    Args:
-        input_path (str): Path to the audio file to be transcribed.
-        output_path (str, optional): Path to the output file where the transcription will be saved. Defaults to "transcription.txt".
-
-    Returns:
-        str: The transcribed text.
+    Speech-to-text with ordered fallback:
+    1. Local Whisper (best control)
+    2. OpenAI transcription (high accuracy)
+    3. Groq transcription (fast fallback)
     """
+    local_model_name = os.getenv("LOCAL_WHISPER_MODEL", "base")
 
-    client = Groq(api_key=GROQ_API_KEY)
-    with open(input_path, "rb") as file:
-        transcription = client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
-            response_format="verbose_json",
-            file=(input_path, file.read())
+    # 1) Local Whisper
+    try:
+        if whisper is None:
+            raise ImportError("whisper package is not installed")
+
+        logger.info("[STT] Using Local Whisper model=%s", local_model_name)
+        model = whisper.load_model(local_model_name)
+        result = model.transcribe(
+            input_path,
+            fp16=False,
+            language=None,  # auto-detect language
         )
-        transcription.text
+        text = (result.get("text") or "").strip()
+        if text:
+            logger.info("[STT] Local Whisper success: %s", text)
+            return text
+    except Exception as e:
+        logger.warning("[STT] Local Whisper failed: %s", e)
 
-    return transcription.text
+    # 2) OpenAI transcription
+    try:
+        logger.info("[STT] Trying OpenAI transcription")
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        with open(input_path, "rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=audio_file,
+            )
+        text = (response.text or "").strip()
+        if text:
+            logger.info("[STT] OpenAI success: %s", text)
+            return text
+    except Exception as e:
+        logger.warning("[STT] OpenAI failed: %s", e)
+
+    # 3) Groq fallback
+    try:
+        logger.info("[STT] Falling back to Groq transcription")
+        client = Groq(api_key=GROQ_API_KEY)
+        with open(input_path, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                model="distil-whisper-large-v3-en",
+                response_format="verbose_json",
+                file=(input_path, file.read()),
+            )
+        text = (transcription.text or "").strip()
+        if text:
+            logger.info("[STT] Groq success: %s", text)
+            return text
+    except Exception as e:
+        logger.error("[STT] All STT methods failed: %s", e)
+
+    return ""
       
 
 
