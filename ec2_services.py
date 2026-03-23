@@ -508,7 +508,7 @@ def _prepare_audio_for_stt(input_path: str) -> str:
     Normalize incoming audio to mono 16k WAV for better STT consistency.
     Falls back to original file when ffmpeg is unavailable or conversion fails.
     """
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = _resolve_ffmpeg_binary()
     if not ffmpeg_path:
         logger.info("[STT] ffmpeg not found; using original audio file")
         return input_path
@@ -540,6 +540,32 @@ def _prepare_audio_for_stt(input_path: str) -> str:
 def preprocess_audio(input_path: str) -> str:
     """Public audio preprocessing entrypoint for STT pipeline."""
     return _prepare_audio_for_stt(input_path)
+
+
+def _resolve_ffmpeg_binary() -> str | None:
+    """Resolve ffmpeg path in restricted runtime environments (e.g., uvicorn services)."""
+    candidates = []
+
+    env_binary = (os.getenv("FFMPEG_BINARY") or "").strip()
+    if env_binary:
+        candidates.append(env_binary)
+
+    from_path = shutil.which("ffmpeg")
+    if from_path:
+        candidates.append(from_path)
+
+    # Common install locations on macOS/Linux when PATH is minimal.
+    candidates.extend([
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ])
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    return None
       
 
 
