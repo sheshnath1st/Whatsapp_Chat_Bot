@@ -20,6 +20,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 EXTRACTION_FAILED_MSG = "Unable to extract business card details"
+TRANSCRIPTION_FAILED_MSG = "Unable to transcribe audio"
 
 app = FastAPI()
 
@@ -96,6 +97,13 @@ async def api_llm_response(req: LLMRequest):
             text_message = await handle_audio_message(req.media_id)
 
             logger.info(f"Transcription: {text_message}")
+
+            if not text_message or not text_message.strip():
+                logger.error("Audio transcription returned empty text")
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": TRANSCRIPTION_FAILED_MSG},
+                )
 
             result = extract_business_card_details(input_text=text_message)
 

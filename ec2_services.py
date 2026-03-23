@@ -6,6 +6,7 @@ import re
 import logging
 import requests
 import httpx
+import tempfile
 from PIL import Image
 from dotenv import load_dotenv
 from io import BytesIO
@@ -32,6 +33,8 @@ WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "groq").lower()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 GROQ_MODEL = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
+OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL") or "gpt-4o-mini-transcribe"
+GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL") or "whisper-large-v3-turbo"
 BUSINESS_CARD_PYTHON_FIRST = (os.getenv("BUSINESS_CARD_PYTHON_FIRST") or "true").lower() == "true"
 BUSINESS_CARD_MIN_FIELDS = int(os.getenv("BUSINESS_CARD_MIN_FIELDS") or 3)
 
@@ -352,7 +355,7 @@ def speech_to_text(input_path: str) -> str:
             logger.info("[STT] Local Whisper success: %s", text)
             return text
     except Exception as e:
-        logger.warning("[STT] Local Whisper failed: %s", e)
+        logger.warning("[STT] Local Whisper failed: %r", e)
 
     # 2) OpenAI transcription
     try:
@@ -360,7 +363,7 @@ def speech_to_text(input_path: str) -> str:
         client = OpenAI(api_key=OPENAI_API_KEY)
         with open(input_path, "rb") as audio_file:
             response = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
+                model=OPENAI_STT_MODEL,
                 file=audio_file,
             )
         text = (response.text or "").strip()
@@ -368,7 +371,7 @@ def speech_to_text(input_path: str) -> str:
             logger.info("[STT] OpenAI success: %s", text)
             return text
     except Exception as e:
-        logger.warning("[STT] OpenAI failed: %s", e)
+        logger.warning("[STT] OpenAI failed: %r", e)
 
     # 3) Groq fallback
     try:
@@ -376,7 +379,7 @@ def speech_to_text(input_path: str) -> str:
         client = Groq(api_key=GROQ_API_KEY)
         with open(input_path, "rb") as file:
             transcription = client.audio.transcriptions.create(
-                model="distil-whisper-large-v3-en",
+                model=GROQ_STT_MODEL,
                 response_format="verbose_json",
                 file=(input_path, file.read()),
             )
@@ -385,7 +388,7 @@ def speech_to_text(input_path: str) -> str:
             logger.info("[STT] Groq success: %s", text)
             return text
     except Exception as e:
-        logger.error("[STT] All STT methods failed: %s", e)
+        logger.error("[STT] All STT methods failed: %r", e)
 
     return ""
       
@@ -521,17 +524,44 @@ async def handle_audio_message(media_id: str):
         str: The transcribed text.
     """
     media_url = await fetch_media(media_id)
-    # print(media_url)
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
         response = await client.get(media_url, headers=headers)
 
         response.raise_for_status()
         audio_bytes = response.content
-        temp_audio_path = "temp_audio.m4a"
-        with open(temp_audio_path, "wb") as f:
-            f.write(audio_bytes)
-        return speech_to_text(temp_audio_path)
+        content_type = (response.headers.get("content-type") or "").lower()
+        suffix_map = {
+            "audio/ogg": ".ogg",
+            "audio/opus": ".opus",
+            "audio/mpeg": ".mp3",
+            "audio/mp3": ".mp3",
+            "audio/mp4": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/webm": ".webm",
+        }
+        suffix = ".ogg"
+        for mime, ext in suffix_map.items():
+            if mime in content_type:
+                suffix = ext
+                break
+
+        logger.info("Audio download content-type=%s size=%d suffix=%s", content_type, len(audio_bytes), suffix)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(audio_bytes)
+            temp_audio_path = temp_file.name
+
+        try:
+            transcription = speech_to_text(temp_audio_path)
+            logger.info("Transcription text length=%d", len(transcription or ""))
+            return transcription
+        finally:
+            try:
+                os.remove(temp_audio_path)
+            except OSError:
+                pass
 
 async def send_audio_message(to: str, file_path: str):
     """
