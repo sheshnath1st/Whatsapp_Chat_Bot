@@ -7,6 +7,8 @@ import logging
 import requests
 import httpx
 import tempfile
+import subprocess
+import shutil
 from PIL import Image
 from dotenv import load_dotenv
 from io import BytesIO
@@ -33,10 +35,14 @@ WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL")
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "groq").lower()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 GROQ_MODEL = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
-OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL") or "gpt-4o-mini-transcribe"
+OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL") or "gpt-4o-transcribe"
 GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL") or "whisper-large-v3-turbo"
+STT_LANGUAGE_HINT = (os.getenv("STT_LANGUAGE_HINT") or "").strip() or None
+STT_PROMPT = (os.getenv("STT_PROMPT") or "").strip() or None
 BUSINESS_CARD_PYTHON_FIRST = (os.getenv("BUSINESS_CARD_PYTHON_FIRST") or "true").lower() == "true"
 BUSINESS_CARD_MIN_FIELDS = int(os.getenv("BUSINESS_CARD_MIN_FIELDS") or 3)
+LLM_FALLBACK_MIN_FIELDS = 3
+SUCCESS_MIN_FIELDS = 2
 
 BUSINESS_CARD_SCHEMA = {
     "name": None,
@@ -49,18 +55,37 @@ BUSINESS_CARD_SCHEMA = {
 }
 
 
-def _normalize_business_card_schema(data: dict) -> dict:
-    """Normalize extracted output into a fixed schema with nullable fields."""
+_NULL_LIKE_VALUES = {"", "null", "none", "n/a", "na", "nil", "unknown", "not available"}
+
+
+def _clean_field_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.lower() in _NULL_LIKE_VALUES:
+            return None
+        return cleaned or None
+    return value
+
+
+def normalize_output(data: dict) -> dict:
+    """Return strict schema output with cleaned values."""
     if not isinstance(data, dict):
         return dict(BUSINESS_CARD_SCHEMA)
 
     normalized = {}
     for key in BUSINESS_CARD_SCHEMA:
-        value = data.get(key)
-        if isinstance(value, str):
-            value = value.strip() or None
-        normalized[key] = value if value is not None else None
+        normalized[key] = _clean_field_value(data.get(key))
     return normalized
+
+
+def merge_results(primary: dict, fallback: dict) -> dict:
+    """Merge two normalized card dicts, preferring non-null values from primary."""
+    merged = {}
+    for key in BUSINESS_CARD_SCHEMA:
+        merged[key] = primary.get(key) if primary.get(key) is not None else fallback.get(key)
+    return normalize_output(merged)
 
 
 def safe_json_parse(response: str) -> dict | None:
@@ -126,7 +151,7 @@ def _call_text_llm(messages: list[dict]) -> str | None:
 
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{2,5}\)?[\s-]?)?\d{3,5}[\s-]?\d{3,6}")
+_INDIAN_PHONE_RE = re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}|[6-9]\d{9}")
 _WEB_RE = re.compile(r"(?:https?://)?(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/\S*)?")
 _DESIGNATION_HINTS = (
     "manager",
@@ -147,14 +172,34 @@ _DESIGNATION_HINTS = (
     "marketing",
 )
 _COMPANY_HINTS = ("ltd", "limited", "pvt", "inc", "llp", "technologies", "solutions", "corp", "company")
+_ADDRESS_HINTS = ("road", "rd", "street", "st", "avenue", "ave", "floor", "near", "city", "state", "india", "pin", "nagar", "colony")
 
 
 def _populated_field_count(data: dict) -> int:
     return sum(1 for value in data.values() if value not in (None, ""))
 
 
-def _python_extract_from_text(text: str) -> dict:
-    """Heuristic field extraction from OCR/transcribed text without calling an LLM."""
+def _normalize_phone_number(phone: str) -> str | None:
+    digits = re.sub(r"\D", "", phone or "")
+    if digits.startswith("91") and len(digits) > 10:
+        digits = digits[-10:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return f"+91{digits}"
+    return None
+
+
+def _extract_indian_phones(text: str) -> list[str]:
+    raw_matches = _INDIAN_PHONE_RE.findall(text or "")
+    normalized = []
+    for match in raw_matches:
+        number = _normalize_phone_number(match)
+        if number and number not in normalized:
+            normalized.append(number)
+    return normalized
+
+
+def extract_from_text(text: str) -> dict:
+    """Python-first business card extraction from text (no LLM)."""
     if not text:
         return dict(BUSINESS_CARD_SCHEMA)
 
@@ -164,12 +209,32 @@ def _python_extract_from_text(text: str) -> dict:
 
     emails = _EMAIL_RE.findall(text)
     websites = [w for w in _WEB_RE.findall(text) if "." in w and "@" not in w]
-    phones = _PHONE_RE.findall(text)
+    phones = _extract_indian_phones(text)
 
     designation = next((l for l in lines if any(h in l.lower() for h in _DESIGNATION_HINTS)), None)
     company = next((l for l in lines if any(h in l.lower() for h in _COMPANY_HINTS)), None)
 
+    inline_name = None
+    # Handles phrases like: "customer Vipul", "name is Vipul", "my name is Vipul Shah"
+    name_patterns = [
+        r"\bcustomer\s+([A-Za-z][A-Za-z\s]{1,40})",
+        r"\bname\s+is\s+([A-Za-z][A-Za-z\s]{1,40})",
+        r"\bmy\s+name\s+is\s+([A-Za-z][A-Za-z\s]{1,40})",
+    ]
+    for pattern in name_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            candidate = re.sub(r"[^A-Za-z\s]", "", match.group(1)).strip()
+            if candidate:
+                inline_name = " ".join(candidate.split()[:4])
+                break
+
     name = None
+    capitalized_name = None
+    cap_match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b", text)
+    if cap_match:
+        capitalized_name = cap_match.group(1).strip()
+
     for line in lines[:6]:
         # Prefer short alphabetic top lines that do not look like contact info.
         if any(token in line.lower() for token in ("@", "www", "http", "+", "tel", "phone")):
@@ -180,19 +245,19 @@ def _python_extract_from_text(text: str) -> dict:
 
     address_lines = [
         l for l in lines
-        if any(k in l.lower() for k in ("road", "rd", "street", "st", "avenue", "ave", "floor", "near", "city", "state", "india", "pin"))
+        if any(k in l.lower() for k in _ADDRESS_HINTS)
     ]
 
     extracted = {
-        "name": name,
+        "name": inline_name or name or capitalized_name,
         "designation": designation,
         "company": company,
-        "phone": ", ".join(dict.fromkeys(p.strip() for p in phones if len(re.sub(r"\D", "", p)) >= 8)) or None,
+        "phone": ", ".join(phones) if phones else None,
         "email": emails[0] if emails else None,
         "website": websites[0] if websites else None,
         "address": ", ".join(address_lines) if address_lines else None,
     }
-    return _normalize_business_card_schema(extracted)
+    return normalize_output(extracted)
 
 
 def _python_extract_from_image(image_base64: str) -> dict | None:
@@ -213,10 +278,46 @@ def _python_extract_from_image(image_base64: str) -> dict | None:
         image = Image.open(BytesIO(image_bytes)).convert("L")
         ocr_text = pytesseract.image_to_string(image)
         logger.info("Python OCR text (first 400 chars): %s", ocr_text[:400])
-        return _python_extract_from_text(ocr_text)
+        return extract_from_text(ocr_text)
     except Exception as e:
         logger.exception("Python-first OCR extraction failed: %s", e)
         return None
+
+
+def _call_business_card_llm(input_text: str = None, image_base64: str = None) -> dict | None:
+    """LLM extraction fallback. Returns parsed JSON dict or None."""
+    if not input_text and not image_base64:
+        return None
+
+    system_prompt = "Extract business card details and return ONLY JSON"
+    raw_response = None
+
+    if image_base64:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract business card details and return ONLY JSON"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                ],
+            },
+        ]
+        completion = client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+        if completion.choices:
+            raw_response = completion.choices[0].message.content
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Extract business card details and return ONLY JSON:\n{input_text}"},
+        ]
+        raw_response = _call_text_llm(messages)
+
+    logger.info("Business card LLM raw response: %s", raw_response)
+    parsed = safe_json_parse(raw_response)
+    logger.info("Business card parsed JSON: %s", parsed)
+    return parsed
 
 
 def extract_business_card_details(input_text: str = None, image_base64: str = None) -> dict | None:
@@ -229,74 +330,48 @@ def extract_business_card_details(input_text: str = None, image_base64: str = No
         logger.error("extract_business_card_details called without text or image")
         return None
 
-    system_prompt = (
-        "You are an information extraction engine for business cards. "
-        "Extract only these fields: name, designation, company, phone, email, website, address. "
-        "Return ONLY valid JSON object with exactly these keys. "
-        "If a field is unavailable, use null. Do not add explanations or markdown."
-    )
-
-    raw_response = None
     try:
         if image_base64:
             logger.info("Business card extraction input type: image")
-            if BUSINESS_CARD_PYTHON_FIRST:
-                python_result = _python_extract_from_image(image_base64)
-                if python_result:
-                    populated = _populated_field_count(python_result)
-                    logger.info(
-                        "Python-first image extraction fields=%d threshold=%d payload=%s",
-                        populated,
-                        BUSINESS_CARD_MIN_FIELDS,
-                        python_result,
-                    )
-                    if populated >= BUSINESS_CARD_MIN_FIELDS:
-                        return python_result
+            python_result = _python_extract_from_image(image_base64) if BUSINESS_CARD_PYTHON_FIRST else dict(BUSINESS_CARD_SCHEMA)
+            logger.info("Python extracted data: %s", python_result)
 
-                logger.info("Python-first image extraction insufficient, falling back to AI vision")
+            if python_result and _populated_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
+                final_python = normalize_output(python_result)
+                logger.info("Final merged JSON: %s", final_python)
+                return final_python
 
-            # Vision extraction uses OpenAI because current Groq path in this project is text-only.
-            client = OpenAI(api_key=OPENAI_API_KEY)
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Extract business card details and return only valid JSON.",
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                        },
-                    ],
-                },
-            ]
-            completion = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=messages,
-            )
-            if completion.choices and len(completion.choices) > 0:
-                raw_response = completion.choices[0].message.content
-        else:
-            logger.info("Business card extraction input type: audio-text")
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Text from spoken business card:\n{input_text}",
-                },
-            ]
-            raw_response = _call_text_llm(messages)
+            llm_parsed = _call_business_card_llm(image_base64=image_base64)
+            if not llm_parsed:
+                return None
 
-        logger.info("Business card LLM raw response: %s", raw_response)
-        parsed = safe_json_parse(raw_response)
-        logger.info("Business card parsed JSON: %s", parsed)
+            llm_result = normalize_output(llm_parsed)
+            merged = merge_results(llm_result, python_result or {})
+            logger.info("Final merged JSON: %s", merged)
+            if _populated_field_count(merged) < SUCCESS_MIN_FIELDS:
+                logger.error("Extraction confidence too low (<2 fields)")
+                return None
+            return merged
 
-        if not parsed:
+        # Audio/text flow: Python-first extraction, LLM only if needed.
+        logger.info("Business card extraction input type: audio-text")
+        python_result = extract_from_text(input_text)
+        logger.info("Python extracted data: %s", python_result)
+
+        if _populated_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
+            final_python = normalize_output(python_result)
+            logger.info("Final merged JSON: %s", final_python)
+            return final_python
+
+        llm_parsed = _call_business_card_llm(input_text=input_text)
+        llm_result = normalize_output(llm_parsed or {})
+        merged = merge_results(llm_result, python_result)
+        logger.info("Final merged JSON: %s", merged)
+
+        if _populated_field_count(merged) < SUCCESS_MIN_FIELDS:
+            logger.error("Extraction confidence too low (<2 fields)")
             return None
-        return _normalize_business_card_schema(parsed)
+        return merged
     except Exception as e:
         logger.exception("Business card extraction failed: %s", e)
         return None
@@ -336,61 +411,135 @@ def speech_to_text(input_path: str) -> str:
     2. OpenAI transcription (high accuracy)
     3. Groq transcription (fast fallback)
     """
-    local_model_name = os.getenv("LOCAL_WHISPER_MODEL", "base")
+    prepared_audio_path = preprocess_audio(input_path)
+    logger.info("[STT] Original audio file: %s", input_path)
+    logger.info("[STT] Normalized audio path: %s", prepared_audio_path)
+    initial_prompt = (
+        "This is a business conversation with names, companies, "
+        "phone numbers, and emails."
+    )
 
-    # 1) Local Whisper
     try:
-        if whisper is None:
-            raise ImportError("whisper package is not installed")
+        # 1) Local Whisper
+        try:
+            if whisper is None:
+                raise ImportError("whisper package is not installed")
 
-        logger.info("[STT] Using Local Whisper model=%s", local_model_name)
-        model = whisper.load_model(local_model_name)
-        result = model.transcribe(
-            input_path,
-            fp16=False,
-            language=None,  # auto-detect language
-        )
-        text = (result.get("text") or "").strip()
-        if text:
-            logger.info("[STT] Local Whisper success: %s", text)
-            return text
-    except Exception as e:
-        logger.warning("[STT] Local Whisper failed: %r", e)
+            model_candidates = ["medium", "base", "small"]
 
-    # 2) OpenAI transcription
+            for model_name in model_candidates:
+                try:
+                    logger.info("[STT] Using Local Whisper model=%s", model_name)
+                    model = whisper.load_model(model_name)
+                    result = model.transcribe(
+                        prepared_audio_path,
+                        fp16=False,
+                        language=STT_LANGUAGE_HINT,
+                        temperature=0,
+                        best_of=5,
+                        beam_size=5,
+                        initial_prompt=initial_prompt,
+                    )
+                    text = (result.get("text") or "").strip()
+                    if text:
+                        logger.info("[STT] Local Whisper success: %s", text)
+                        return text
+                except MemoryError:
+                    logger.warning("[STT] Local Whisper model=%s failed: MemoryError", model_name)
+                    continue
+                except Exception as model_error:
+                    logger.warning("[STT] Local Whisper model=%s failed: %r", model_name, model_error)
+                    continue
+        except Exception as e:
+            logger.warning("[STT] Local Whisper failed: %r", e)
+
+        # 2) OpenAI transcription
+        try:
+            logger.info("[STT] Trying OpenAI transcription")
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            with open(prepared_audio_path, "rb") as audio_file:
+                kwargs = {
+                    "model": OPENAI_STT_MODEL,
+                    "file": audio_file,
+                }
+                if STT_LANGUAGE_HINT:
+                    kwargs["language"] = STT_LANGUAGE_HINT
+                if STT_PROMPT:
+                    kwargs["prompt"] = STT_PROMPT
+                response = client.audio.transcriptions.create(**kwargs)
+            text = (response.text or "").strip()
+            if text:
+                logger.info("[STT] OpenAI success: %s", text)
+                return text
+        except Exception as e:
+            logger.warning("[STT] OpenAI failed: %r", e)
+
+        # 3) Groq fallback
+        try:
+            logger.info("[STT] Falling back to Groq transcription")
+            client = Groq(api_key=GROQ_API_KEY)
+            with open(prepared_audio_path, "rb") as file:
+                kwargs = {
+                    "model": GROQ_STT_MODEL,
+                    "response_format": "verbose_json",
+                    "file": (prepared_audio_path, file.read()),
+                }
+                if STT_LANGUAGE_HINT:
+                    kwargs["language"] = STT_LANGUAGE_HINT
+                transcription = client.audio.transcriptions.create(**kwargs)
+            text = (transcription.text or "").strip()
+            if text:
+                logger.info("[STT] Groq success: %s", text)
+                return text
+        except Exception as e:
+            logger.error("[STT] All STT methods failed: %r", e)
+
+        return ""
+    finally:
+        if prepared_audio_path != input_path:
+            try:
+                os.remove(prepared_audio_path)
+            except OSError:
+                pass
+
+
+def _prepare_audio_for_stt(input_path: str) -> str:
+    """
+    Normalize incoming audio to mono 16k WAV for better STT consistency.
+    Falls back to original file when ffmpeg is unavailable or conversion fails.
+    """
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        logger.info("[STT] ffmpeg not found; using original audio file")
+        return input_path
+
+    normalized_path = f"{input_path}.normalized.wav"
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        input_path,
+        "-af",
+        "highpass=f=200,lowpass=f=3000",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-vn",
+        normalized_path,
+    ]
     try:
-        logger.info("[STT] Trying OpenAI transcription")
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        with open(input_path, "rb") as audio_file:
-            response = client.audio.transcriptions.create(
-                model=OPENAI_STT_MODEL,
-                file=audio_file,
-            )
-        text = (response.text or "").strip()
-        if text:
-            logger.info("[STT] OpenAI success: %s", text)
-            return text
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info("[STT] Normalized audio generated: %s", normalized_path)
+        return normalized_path
     except Exception as e:
-        logger.warning("[STT] OpenAI failed: %r", e)
+        logger.warning("[STT] Audio normalization failed, using original: %r", e)
+        return input_path
 
-    # 3) Groq fallback
-    try:
-        logger.info("[STT] Falling back to Groq transcription")
-        client = Groq(api_key=GROQ_API_KEY)
-        with open(input_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                model=GROQ_STT_MODEL,
-                response_format="verbose_json",
-                file=(input_path, file.read()),
-            )
-        text = (transcription.text or "").strip()
-        if text:
-            logger.info("[STT] Groq success: %s", text)
-            return text
-    except Exception as e:
-        logger.error("[STT] All STT methods failed: %r", e)
 
-    return ""
+def preprocess_audio(input_path: str) -> str:
+    """Public audio preprocessing entrypoint for STT pipeline."""
+    return _prepare_audio_for_stt(input_path)
       
 
 
@@ -552,6 +701,7 @@ async def handle_audio_message(media_id: str):
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(audio_bytes)
             temp_audio_path = temp_file.name
+        logger.info("Audio temp file path: %s", temp_audio_path)
 
         try:
             transcription = speech_to_text(temp_audio_path)
