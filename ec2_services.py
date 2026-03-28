@@ -49,7 +49,7 @@ SUCCESS_MIN_FIELDS = 2
 # Override via env vars, e.g. WHISPER_MODELS=small,medium for a more capable instance.
 EC2_WHISPER_MODELS = [
     m.strip()
-    for m in (os.getenv("WHISPER_MODELS") or "tiny,base").split(",")
+    for m in (os.getenv("WHISPER_MODELS") or "base,tiny").split(",")
     if m.strip()
 ]
 MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION") or 1024)
