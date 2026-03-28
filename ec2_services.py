@@ -69,49 +69,26 @@ BUSINESS_CARD_SCHEMA = {
     "address": None,
 }
 
-# Schema returned for audio / text / contact inputs.
-LEAD_SCHEMA = {
-    "lead": {
-        "customerName": None,
-        "phoneNumber": None,
-        "emailId": None,
-    },
-    "reminder": {
-        "followUpCall": None,
-        "status": None,
-    },
-}
-
-_LEAD_EXTRACTION_SYSTEM_PROMPT = (
-    "You are an AI assistant that extracts structured data from user input.\n\n"
-    "Input will be a transcription of audio (may contain instructions, names, "
-    "phone numbers, emails, and follow-up tasks).\n\n"
-    "Your task:\n"
-    "1. Extract lead/customer details\n"
-    "2. Extract reminder/follow-up details\n"
-    "3. Return ONLY valid JSON (no explanation, no markdown, no extra text)\n\n"
-    "Strict JSON format:\n"
+_TEXT_BUSINESS_CARD_SYSTEM_PROMPT = (
+    "Extract business card or lead details from text and return ONLY valid JSON.\n\n"
+    "Use exactly this schema:\n"
     '{\n'
-    '  "lead": {\n'
-    '    "customerName": string or null,\n'
-    '    "phoneNumber": string or null,\n'
-    '    "emailId": string or null\n'
-    '  },\n'
-    '  "reminder": {\n'
-    '    "followUpCall": string or null,\n'
-    '    "status": "pending"\n'
-    '  }\n'
+    '  "name": string or null,\n'
+    '  "designation": string or null,\n'
+    '  "company": string or null,\n'
+    '  "phone": string or null,\n'
+    '  "email": string or null,\n'
+    '  "website": string or null,\n'
+    '  "address": string or null\n'
     '}\n\n'
     "Rules:\n"
-    "- Extract clean name (remove extra words like phone number, customer, etc.)\n"
-    "- Phone number must contain only digits (no spaces or text)\n"
-    "- Email must be valid format\n"
-    "- If any field is missing, return null\n"
-    "- If reminder exists (e.g. after 3 days, tomorrow), extract it as-is in followUpCall\n"
-    "- Always set reminder.status = pending if reminder exists, else null\n"
-    "- Do NOT hallucinate missing data\n"
-    "- Do NOT include extra fields\n"
-    "- Output MUST be valid JSON only"
+    "- Return only the JSON object, with no markdown or explanation.\n"
+    "- Ignore reminders, follow-up instructions, tasks, dates, and CRM actions unless they contain one of the schema fields.\n"
+    "- Extract a clean person name only.\n"
+    "- Phone should contain digits, optionally with country code if explicitly present.\n"
+    "- Do not put full transcript sentences into designation, company, or address.\n"
+    "- If a field is missing, set it to null.\n"
+    "- Do not add extra fields."
 )
 
 
@@ -146,78 +123,6 @@ def merge_results(primary: dict, fallback: dict) -> dict:
     for key in BUSINESS_CARD_SCHEMA:
         merged[key] = primary.get(key) if primary.get(key) is not None else fallback.get(key)
     return normalize_output(merged)
-
-
-def _normalize_lead_output(data: dict) -> dict:
-    """Normalize LLM output to LEAD_SCHEMA. Ensures phone contains only digits."""
-    empty = {
-        "lead": {"customerName": None, "phoneNumber": None, "emailId": None},
-        "reminder": {"followUpCall": None, "status": None},
-    }
-    if not isinstance(data, dict):
-        return empty
-
-    lead_raw = data.get("lead") or {}
-    reminder_raw = data.get("reminder") or {}
-
-    customer_name = _clean_field_value(lead_raw.get("customerName"))
-    phone_raw = _clean_field_value(lead_raw.get("phoneNumber"))
-    email_id = _clean_field_value(lead_raw.get("emailId"))
-    follow_up = _clean_field_value(reminder_raw.get("followUpCall"))
-
-    # Strip everything except digits from phone
-    if phone_raw:
-        digits_only = re.sub(r"\D", "", phone_raw)
-        phone_raw = digits_only if digits_only else None
-
-    status = _clean_field_value(reminder_raw.get("status")) if follow_up else None
-
-    return {
-        "lead": {
-            "customerName": customer_name,
-            "phoneNumber": phone_raw,
-            "emailId": email_id,
-        },
-        "reminder": {
-            "followUpCall": follow_up,
-            "status": status,
-        },
-    }
-
-
-def _python_result_to_lead(python_result: dict) -> dict:
-    """Map flat python extraction result to {lead, reminder} schema."""
-    phone = python_result.get("phone")
-    if phone:
-        phone = re.sub(r"\D", "", phone) or None
-    return {
-        "lead": {
-            "customerName": python_result.get("name"),
-            "phoneNumber": phone,
-            "emailId": python_result.get("email"),
-        },
-        "reminder": {
-            "followUpCall": None,
-            "status": None,
-        },
-    }
-
-
-def _call_lead_extraction_llm(input_text: str) -> dict | None:
-    """Call LLM with the lead/reminder extraction prompt. Returns parsed dict or None."""
-    messages = [
-        {"role": "system", "content": _LEAD_EXTRACTION_SYSTEM_PROMPT},
-        {"role": "user", "content": input_text},
-    ]
-    try:
-        raw_response = _call_text_llm(messages)
-        logger.info("Lead extraction LLM raw response: %s", raw_response)
-        parsed = safe_json_parse(raw_response)
-        logger.info("Lead extraction parsed JSON: %s", parsed)
-        return parsed
-    except Exception as e:
-        logger.exception("Lead extraction LLM call failed: %s", e)
-        return None
 
 
 def safe_json_parse(response: str) -> dict | None:
@@ -499,7 +404,7 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None) ->
         return None
 
     try:
-        system_prompt = "Extract business card details and return ONLY JSON"
+        system_prompt = _TEXT_BUSINESS_CARD_SYSTEM_PROMPT if input_text else "Extract business card details and return ONLY JSON"
         raw_response = None
 
         if image_base64:
@@ -566,51 +471,20 @@ def extract_business_card_details(input_text: str = None, image_base64: str = No
                 return None
             return merged
 
-        # Audio/text flow: Python-first extraction, LLM only if needed.
+        # Audio/text flow: Python-first extraction with flat business-card schema.
         logger.info("Business card extraction input type: audio-text")
         python_result = extract_from_text(input_text)
         logger.info("Python extracted data: %s", python_result)
 
-        if _confident_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
-            # Enough confident regex fields — still call LLM to capture reminder.
-            llm_parsed = _call_lead_extraction_llm(input_text)
-            if llm_parsed:
-                lead_result = _normalize_lead_output(llm_parsed)
-                # Fill any null lead fields with python-extracted values
-                py_lead = _python_result_to_lead(python_result)
-                for field in ("customerName", "phoneNumber", "emailId"):
-                    if lead_result["lead"].get(field) is None:
-                        lead_result["lead"][field] = py_lead["lead"].get(field)
-                logger.info("Final merged JSON: %s", lead_result)
-                return lead_result
-            # LLM failed — return python result in lead format
-            final = _python_result_to_lead(python_result)
-            logger.info("Final merged JSON: %s", final)
-            return final
+        llm_parsed = _call_business_card_llm(input_text=input_text)
+        llm_result = normalize_output(llm_parsed or {})
+        merged = merge_results(llm_result, python_result)
+        logger.info("Final merged JSON: %s", merged)
 
-        llm_parsed = _call_lead_extraction_llm(input_text)
-        if llm_parsed:
-            lead_result = _normalize_lead_output(llm_parsed)
-            # Fill any null lead fields with python-extracted values
-            py_lead = _python_result_to_lead(python_result)
-            for field in ("customerName", "phoneNumber", "emailId"):
-                if lead_result["lead"].get(field) is None:
-                    lead_result["lead"][field] = py_lead["lead"].get(field)
-            logger.info("Final merged JSON: %s", lead_result)
-            populated = sum(1 for v in lead_result["lead"].values() if v is not None)
-            if populated < SUCCESS_MIN_FIELDS:
-                logger.error("Extraction confidence too low (<2 fields)")
-                return None
-            return lead_result
-
-        # Both python and LLM insufficient — last resort: return python in lead format
-        py_lead = _python_result_to_lead(python_result)
-        populated = sum(1 for v in py_lead["lead"].values() if v is not None)
-        if populated < SUCCESS_MIN_FIELDS:
+        if _populated_field_count(merged) < SUCCESS_MIN_FIELDS:
             logger.error("Extraction confidence too low (<2 fields)")
             return None
-        logger.info("Final merged JSON: %s", py_lead)
-        return py_lead
+        return merged
     except Exception as e:
         logger.exception("Business card extraction failed: %s", e)
         return None
