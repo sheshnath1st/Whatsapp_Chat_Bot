@@ -9,6 +9,7 @@ load_dotenv()
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 class WhatsAppMessage(BaseModel):
     object: str
     entry: list
@@ -81,8 +82,18 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     print("Received webhook data:", data)
     message_data = WhatsAppMessage(**data)
-    
     change = message_data.entry[0]["changes"][0]["value"]
+    # ✅ FILTER: Only allow your business number
+    metadata = change.get("metadata", {})
+    incoming_phone_id = metadata.get("phone_number_id")
+    if incoming_phone_id != PHONE_NUMBER_ID:
+        print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    # ✅ Only process message events
+    if 'messages' not in change:
+        return JSONResponse(status_code=200, content={"status": "no message event"})    
+
     print(f"Webhook change: {change}")
     if 'messages' in change:
         message = change["messages"][-1]

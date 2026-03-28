@@ -425,7 +425,7 @@ def speech_to_text(input_path: str) -> str:
             if whisper is None:
                 raise ImportError("whisper package is not installed")
 
-            model_candidates = ["medium", "base", "small"]
+            model_candidates = [ "base", "small","medium", "large"]
 
             for model_name in model_candidates:
                 try:
