@@ -60,26 +60,26 @@ WHISPER_CACHE_MODEL = (os.getenv("WHISPER_CACHE_MODEL") or "true").lower() == "t
 _whisper_model_cache: dict = {}
 
 BUSINESS_CARD_SCHEMA = {
-    "name": None,
-    "designation": None,
-    "company": None,
-    "phone": None,
-    "email": None,
-    "website": None,
-    "address": None,
+    "name": "",
+    "designation": "",
+    "company": "",
+    "phone": "",
+    "email": "",
+    "website": "",
+    "address": "",
 }
 
 _TEXT_BUSINESS_CARD_SYSTEM_PROMPT = (
     "Extract business card or lead details from text and return ONLY valid JSON.\n\n"
     "Use exactly this schema:\n"
     '{\n'
-    '  "name": string or null,\n'
-    '  "designation": string or null,\n'
-    '  "company": string or null,\n'
-    '  "phone": string or null,\n'
-    '  "email": string or null,\n'
-    '  "website": string or null,\n'
-    '  "address": string or null\n'
+    '  "name": string or empty string,\n'
+    '  "designation": string or empty string,\n'
+    '  "company": string or empty string,\n'
+    '  "phone": string or empty string,\n'
+    '  "email": string or empty string,\n'
+    '  "website": string or empty string,\n'
+    '  "address": string or empty string\n'
     '}\n\n'
     "Rules:\n"
     "- Return only the JSON object, with no markdown or explanation.\n"
@@ -87,7 +87,7 @@ _TEXT_BUSINESS_CARD_SYSTEM_PROMPT = (
     "- Extract a clean person name only.\n"
     "- Phone should contain digits, optionally with country code if explicitly present.\n"
     "- Do not put full transcript sentences into designation, company, or address.\n"
-    "- If a field is missing, set it to null.\n"
+    "- If a field is missing, use an empty string \"\" instead of null.\n"
     "- Do not add extra fields."
 )
 
@@ -97,31 +97,36 @@ _NULL_LIKE_VALUES = {"", "null", "none", "n/a", "na", "nil", "unknown", "not ava
 
 def _clean_field_value(value):
     if value is None:
-        return None
+        return ""
     if isinstance(value, str):
         cleaned = value.strip()
         if cleaned.lower() in _NULL_LIKE_VALUES:
-            return None
-        return cleaned or None
-    return value
+            return ""
+        return cleaned or ""
+    return value if value else ""
 
 
 def normalize_output(data: dict) -> dict:
-    """Return strict schema output with cleaned values."""
+    """Return strict schema output with cleaned values (null replaced with empty string)."""
     if not isinstance(data, dict):
         return dict(BUSINESS_CARD_SCHEMA)
 
     normalized = {}
     for key in BUSINESS_CARD_SCHEMA:
-        normalized[key] = _clean_field_value(data.get(key))
+        value = _clean_field_value(data.get(key))
+        # Ensure all None values are converted to empty strings
+        normalized[key] = value if value is not None else ""
     return normalized
 
 
 def merge_results(primary: dict, fallback: dict) -> dict:
-    """Merge two normalized card dicts, preferring non-null values from primary."""
+    """Merge two normalized card dicts, preferring non-empty values from primary."""
     merged = {}
     for key in BUSINESS_CARD_SCHEMA:
-        merged[key] = primary.get(key) if primary.get(key) is not None else fallback.get(key)
+        # Prefer primary if it has a non-empty value, else use fallback
+        primary_val = primary.get(key)
+        fallback_val = fallback.get(key)
+        merged[key] = primary_val if (primary_val and primary_val != "") else fallback_val
     return normalize_output(merged)
 
 

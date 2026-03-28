@@ -17,6 +17,8 @@ BASE_URL = os.getenv("BASE_URL")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:5000")
+SALESFORCE_API_URL = os.getenv("SALESFORCE_API_URL")
+SALESFORCE_COOKIE = os.getenv("SALESFORCE_COOKIE")
 
 def send_message(to: str, text: str):
     print(f"Preparing to send message to {to}: {text}")
@@ -61,6 +63,35 @@ async def send_message_async(user_phone: str, message: str):
 
 
         
+def send_to_salesforce(business_card_data: dict):
+    """Send extracted business card data to Salesforce API."""
+    if not SALESFORCE_API_URL:
+        print("Warning: SALESFORCE_API_URL not configured, skipping Salesforce sync")
+        return
+    
+    try:
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if SALESFORCE_COOKIE:
+            headers["Cookie"] = SALESFORCE_COOKIE
+        
+        print(f"Sending business card data to Salesforce: {business_card_data}")
+        response = requests.post(
+            SALESFORCE_API_URL,
+            headers=headers,
+            json=business_card_data,
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            print("Business card data sent to Salesforce successfully")
+        else:
+            print(f"Salesforce API error (status {response.status_code}): {response.text}")
+    except Exception as exc:
+        print(f"Error sending data to Salesforce: {exc}")
+
+
 async def send_audio_message(to: str, file_path: str):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/media"
     with open(file_path, "rb") as file_handle:
@@ -130,16 +161,25 @@ async def llm_reply_to_text_v2(user_input: str, user_phone: str, media_id: str =
             return
 
         response_data = response.json()
-        print("LLM API response:", response_data)
+        print("LLM API response:", response_data, "of type", type(user_phone))
         if response.status_code == 200 and response_data.get("error") is None:
             message_content = response_data.get("response")
-            if isinstance(message_content, dict):
+            business_card_data = None
+            
+            # Check if response contains business card data (from audio/image/contact extraction)
+            if isinstance(message_content, dict) and any(key in message_content for key in ["name", "phone", "email"]):
+                business_card_data = message_content
                 message_content = json.dumps(message_content, ensure_ascii=False)
+            
             print(f"LLM API message content: {message_content}")
             if message_content:
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content}")
                 await loop.run_in_executor(None, send_message, user_phone, message_content)
+                
+                # If business card data was extracted, also send to Salesforce
+                if business_card_data:
+                    loop.run_in_executor(None, send_to_salesforce, business_card_data)
             else:
                 print("Error: Empty message content from LLM API")
                 await send_message_async(user_phone, "Received empty response from LLM API.")
