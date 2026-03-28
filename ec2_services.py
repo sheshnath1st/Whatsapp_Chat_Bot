@@ -215,6 +215,28 @@ def _populated_field_count(data: dict) -> int:
     return sum(1 for value in data.values() if value not in (None, ""))
 
 
+_NORMALIZED_PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
+
+
+def _confident_field_count(data: dict) -> int:
+    """Like _populated_field_count but only counts phone when it is
+    properly normalized to +91XXXXXXXXXX. An unformatted/partial phone number
+    (e.g. 9-digit spoken number) is not counted so the LLM fallback is still
+    triggered to produce a clean result."""
+    count = 0
+    for key, value in data.items():
+        if value in (None, ""):
+            continue
+        if key == "phone":
+            # Count only if every number in a comma-separated list is normalized.
+            numbers = [v.strip() for v in str(value).split(",") if v.strip()]
+            if numbers and all(_NORMALIZED_PHONE_RE.match(n) for n in numbers):
+                count += 1
+        else:
+            count += 1
+    return count
+
+
 def _normalize_phone_number(phone: str) -> str | None:
     digits = re.sub(r"\D", "", phone or "")
     if digits.startswith("91") and len(digits) > 10:
@@ -410,7 +432,7 @@ def extract_business_card_details(input_text: str = None, image_base64: str = No
             python_result = _python_extract_from_image(image_base64) if BUSINESS_CARD_PYTHON_FIRST else dict(BUSINESS_CARD_SCHEMA)
             logger.info("Python extracted data: %s", python_result)
 
-            if python_result and _populated_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
+            if python_result and _confident_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
                 final_python = normalize_output(python_result)
                 logger.info("Final merged JSON: %s", final_python)
                 return final_python
@@ -432,7 +454,7 @@ def extract_business_card_details(input_text: str = None, image_base64: str = No
         python_result = extract_from_text(input_text)
         logger.info("Python extracted data: %s", python_result)
 
-        if _populated_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
+        if _confident_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
             final_python = normalize_output(python_result)
             logger.info("Final merged JSON: %s", final_python)
             return final_python
