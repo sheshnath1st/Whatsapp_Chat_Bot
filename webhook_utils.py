@@ -38,11 +38,19 @@ def send_message(to: str, text: str):
     print(f"Send URL WHATSAPP_API_URL: {WHATSAPP_API_URL}")
     print(f"Send URL headers: {headers}")
     print(f"Send URL payload: {payload}")
-    response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload)
-    if response.status_code == 200:
-        print("Message sent")
-    else:
-        print(f"Send failed: {response.text}")
+
+    for attempt in range(3):
+        try:
+            response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=15)
+            if response.status_code == 200:
+                print("Message sent")
+                return
+            print(f"Send failed (attempt {attempt + 1}): {response.text}")
+        except requests.exceptions.Timeout:
+            print(f"Send timeout (attempt {attempt + 1})")
+        except Exception as exc:
+            print(f"Send error (attempt {attempt + 1}): {exc}")
+            break  # Non-transient error; don't retry
 
 
 
@@ -141,4 +149,7 @@ async def llm_reply_to_text_v2(user_input: str, user_phone: str, media_id: str =
 
     except Exception as e:
         print("LLM error:", e)
-        await send_message_async(user_phone, "Sorry, something went wrong while generating a response.")
+        try:
+            await send_message_async(user_phone, "Sorry, something went wrong while generating a response.")
+        except Exception as send_err:
+            print("Failed to send error reply:", send_err)

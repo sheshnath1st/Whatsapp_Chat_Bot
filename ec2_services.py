@@ -9,6 +9,7 @@ import httpx
 import tempfile
 import subprocess
 import shutil
+import gc
 from PIL import Image
 from dotenv import load_dotenv
 from io import BytesIO
@@ -43,6 +44,18 @@ BUSINESS_CARD_PYTHON_FIRST = (os.getenv("BUSINESS_CARD_PYTHON_FIRST") or "true")
 BUSINESS_CARD_MIN_FIELDS = int(os.getenv("BUSINESS_CARD_MIN_FIELDS") or 3)
 LLM_FALLBACK_MIN_FIELDS = 3
 SUCCESS_MIN_FIELDS = 2
+
+# Low-memory EC2 tuning: use smallest Whisper models by default; resize large images.
+# Override via env vars, e.g. WHISPER_MODELS=small,medium for a more capable instance.
+EC2_WHISPER_MODELS = [
+    m.strip()
+    for m in (os.getenv("WHISPER_MODELS") or "tiny,base").split(",")
+    if m.strip()
+]
+MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION") or 1024)
+# Cache the loaded Whisper model to avoid reloading on every audio request.
+WHISPER_CACHE_MODEL = (os.getenv("WHISPER_CACHE_MODEL") or "true").lower() == "true"
+_whisper_model_cache: dict = {}
 
 BUSINESS_CARD_SCHEMA = {
     "name": None,
@@ -289,35 +302,39 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None) ->
     if not input_text and not image_base64:
         return None
 
-    system_prompt = "Extract business card details and return ONLY JSON"
-    raw_response = None
+    try:
+        system_prompt = "Extract business card details and return ONLY JSON"
+        raw_response = None
 
-    if image_base64:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract business card details and return ONLY JSON"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                ],
-            },
-        ]
-        completion = client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
-        if completion.choices:
-            raw_response = completion.choices[0].message.content
-    else:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Extract business card details and return ONLY JSON:\n{input_text}"},
-        ]
-        raw_response = _call_text_llm(messages)
+        if image_base64:
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract business card details and return ONLY JSON"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    ],
+                },
+            ]
+            completion = client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+            if completion.choices:
+                raw_response = completion.choices[0].message.content
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Extract business card details and return ONLY JSON:\n{input_text}"},
+            ]
+            raw_response = _call_text_llm(messages)
 
-    logger.info("Business card LLM raw response: %s", raw_response)
-    parsed = safe_json_parse(raw_response)
-    logger.info("Business card parsed JSON: %s", parsed)
-    return parsed
+        logger.info("Business card LLM raw response: %s", raw_response)
+        parsed = safe_json_parse(raw_response)
+        logger.info("Business card parsed JSON: %s", parsed)
+        return parsed
+    except Exception as e:
+        logger.exception("Business card LLM call failed: %s", e)
+        return None
 
 
 def extract_business_card_details(input_text: str = None, image_base64: str = None) -> dict | None:
@@ -425,12 +442,17 @@ def speech_to_text(input_path: str) -> str:
             if whisper is None:
                 raise ImportError("whisper package is not installed")
 
-            model_candidates = [ "base", "small","medium", "large"]
+            model_candidates = EC2_WHISPER_MODELS
 
             for model_name in model_candidates:
                 try:
                     logger.info("[STT] Using Local Whisper model=%s", model_name)
-                    model = whisper.load_model(model_name)
+                    if WHISPER_CACHE_MODEL and model_name in _whisper_model_cache:
+                        model = _whisper_model_cache[model_name]
+                    else:
+                        model = whisper.load_model(model_name)
+                        if WHISPER_CACHE_MODEL:
+                            _whisper_model_cache[model_name] = model
                     result = model.transcribe(
                         prepared_audio_path,
                         fp16=False,
@@ -443,9 +465,12 @@ def speech_to_text(input_path: str) -> str:
                     text = (result.get("text") or "").strip()
                     if text:
                         logger.info("[STT] Local Whisper success: %s", text)
+                        gc.collect()
                         return text
                 except MemoryError:
-                    logger.warning("[STT] Local Whisper model=%s failed: MemoryError", model_name)
+                    logger.warning("[STT] Local Whisper model=%s failed: MemoryError — evicting from cache", model_name)
+                    _whisper_model_cache.pop(model_name, None)
+                    gc.collect()
                     continue
                 except Exception as model_error:
                     logger.warning("[STT] Local Whisper model=%s failed: %r", model_name, model_error)
@@ -604,14 +629,14 @@ def get_llm_response(text_input: str, image_input : str = None) -> Optional[str]
                 }
             ]
             completion = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=OPENAI_MODEL,
                 messages=messages
             )
         else:
             # Use Groq for text-only responses
             client = Groq(api_key=GROQ_API_KEY)
             completion = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model=GROQ_MODEL,
                 messages=[
                     {
                         "role": "user",
@@ -678,13 +703,14 @@ async def handle_image_message(media_id: str) -> str:
         response = await client.get(media_url, headers=headers)
         response.raise_for_status()
 
-        # Convert image to base64
+        # Resize large images before encoding to cap peak memory usage.
         image = Image.open(BytesIO(response.content))
+        if max(image.size) > MAX_IMAGE_DIMENSION:
+            image.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.LANCZOS)
         buffered = BytesIO()
-        image.save(buffered, format="JPEG")  # Save as JPEG
-        # image.save("./test.jpeg", format="JPEG")  # Optional save
+        image.save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-        
+        gc.collect()
         return base64_image
 
 async def handle_audio_message(media_id: str):

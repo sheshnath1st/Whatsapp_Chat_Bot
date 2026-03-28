@@ -2,10 +2,17 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from webhook_utils import llm_reply_to_text_v2
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token")
@@ -79,42 +86,61 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
-    data = await request.json()
-    print("Received webhook data:", data)
-    message_data = WhatsAppMessage(**data)
-    change = message_data.entry[0]["changes"][0]["value"]
-    # ✅ FILTER: Only allow your business number
-    metadata = change.get("metadata", {})
-    incoming_phone_id = metadata.get("phone_number_id")
-    if incoming_phone_id != PHONE_NUMBER_ID:
-        print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
-        return JSONResponse(status_code=200, content={"status": "ignored"})
+    try:
+        data = await request.json()
+    except Exception as exc:
+        logger.warning("Malformed webhook payload: %r", exc)
+        return JSONResponse(status_code=200, content={"status": "bad_request"})
 
-    # ✅ Only process message events
-    if 'messages' not in change:
-        return JSONResponse(status_code=200, content={"status": "no message event"})    
+    try:
+        print("Received webhook data:", data)
+        message_data = WhatsAppMessage(**data)
 
-    print(f"Webhook change: {change}")
-    if 'messages' in change:
-        message = change["messages"][-1]
-        user_phone = message["from"]
-        print(message)
-        if "text" in message:
-            user_message = message["text"]["body"].lower()
-            print(user_message)
-            background_tasks.add_task(llm_reply_to_text_v2, user_message, user_phone,None,None)
-        elif "image" in message:
-            media_id = message["image"]["id"]
-            print(media_id)
-            caption = message["image"].get("caption", "")
-            background_tasks.add_task(llm_reply_to_text_v2, caption, user_phone, media_id, "image")
-        elif message.get("audio"):
-            media_id = message["audio"]["id"]
-            print(media_id)
-            background_tasks.add_task(llm_reply_to_text_v2, "", user_phone, media_id, "audio")
-        elif message.get("contacts"):
-            contacts = message.get("contacts") or []
-            if contacts:
-                contact_text = _contact_to_extraction_text(contacts[0])
-                background_tasks.add_task(llm_reply_to_text_v2, contact_text, user_phone, None, "contact")
+        if not message_data.entry:
+            return JSONResponse(status_code=200, content={"status": "no entry"})
+
+        changes = message_data.entry[0].get("changes") or []
+        if not changes:
+            return JSONResponse(status_code=200, content={"status": "no changes"})
+
+        change = changes[0].get("value", {})
+        # ✅ FILTER: Only allow your business number
+        metadata = change.get("metadata", {})
+        incoming_phone_id = metadata.get("phone_number_id")
+        if incoming_phone_id != PHONE_NUMBER_ID:
+            print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
+            return JSONResponse(status_code=200, content={"status": "ignored"})
+
+        # ✅ Only process message events
+        if 'messages' not in change:
+            return JSONResponse(status_code=200, content={"status": "no message event"})
+
+        print(f"Webhook change: {change}")
+        if 'messages' in change:
+            message = change["messages"][-1]
+            user_phone = message["from"]
+            print(message)
+            if "text" in message:
+                user_message = message["text"]["body"].lower()
+                print(user_message)
+                background_tasks.add_task(llm_reply_to_text_v2, user_message, user_phone, None, None)
+            elif "image" in message:
+                media_id = message["image"]["id"]
+                print(media_id)
+                caption = message["image"].get("caption", "")
+                background_tasks.add_task(llm_reply_to_text_v2, caption, user_phone, media_id, "image")
+            elif message.get("audio"):
+                media_id = message["audio"]["id"]
+                print(media_id)
+                background_tasks.add_task(llm_reply_to_text_v2, "", user_phone, media_id, "audio")
+            elif message.get("contacts"):
+                contacts = message.get("contacts") or []
+                if contacts:
+                    contact_text = _contact_to_extraction_text(contacts[0])
+                    background_tasks.add_task(llm_reply_to_text_v2, contact_text, user_phone, None, "contact")
         return JSONResponse(status_code=200, content={"status": "ok"})
+
+    except Exception as exc:
+        logger.exception("Unhandled error in webhook_handler: %r", exc)
+        # Always return 200 so Meta does not retry the delivery.
+        return JSONResponse(status_code=200, content={"status": "error"})
