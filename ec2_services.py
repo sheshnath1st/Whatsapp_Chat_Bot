@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from openai import OpenAI
 import os
 import base64
@@ -164,7 +166,13 @@ def _call_text_llm(messages: list[dict]) -> str | None:
 
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_INDIAN_PHONE_RE = re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}|[6-9]\d{9}")
+# Matches strict 10-digit Indian numbers (+91 prefix optional)
+_INDIAN_PHONE_RE = re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}")
+# Looser pattern: numbers mentioned with a 'phone number' / 'number' spoken keyword
+_SPOKEN_PHONE_RE = re.compile(
+    r"(?:phone\s+(?:number\s+)?|(?<![\w])number\s+)(\d[\d\s\-]{6,13})",
+    re.IGNORECASE,
+)
 _WEB_RE = re.compile(r"(?:https?://)?(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/\S*)?")
 _DESIGNATION_HINTS = (
     "manager",
@@ -179,13 +187,28 @@ _DESIGNATION_HINTS = (
     "cto",
     "coo",
     "president",
-    "lead",
+    # "lead" removed — too generic (e.g. "create a lead for…")
+    "team lead",
     "head",
     "sales",
     "marketing",
 )
+# Use word-boundary safe tuples so substring matching won't fire on partial words.
 _COMPANY_HINTS = ("ltd", "limited", "pvt", "inc", "llp", "technologies", "solutions", "corp", "company")
-_ADDRESS_HINTS = ("road", "rd", "street", "st", "avenue", "ave", "floor", "near", "city", "state", "india", "pin", "nagar", "colony")
+# Keep "st" and "rd" as whole-word hints only (compile once for speed)
+_ADDRESS_HINTS = ("road", "street", "avenue", "floor", "near", "city", "state", "india", "pin", "nagar", "colony")
+_ADDRESS_HINTS_WB = re.compile(
+    r"\b(?:" + "|".join(re.escape(h) for h in _ADDRESS_HINTS) + r")\b",
+    re.IGNORECASE,
+)
+_DESIGNATION_HINTS_WB = re.compile(
+    r"\b(?:" + "|".join(re.escape(h) for h in _DESIGNATION_HINTS) + r")\b",
+    re.IGNORECASE,
+)
+_COMPANY_HINTS_WB = re.compile(
+    r"\b(?:" + "|".join(re.escape(h) for h in _COMPANY_HINTS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _populated_field_count(data: dict) -> int:
@@ -202,13 +225,31 @@ def _normalize_phone_number(phone: str) -> str | None:
 
 
 def _extract_indian_phones(text: str) -> list[str]:
-    raw_matches = _INDIAN_PHONE_RE.findall(text or "")
-    normalized = []
-    for match in raw_matches:
-        number = _normalize_phone_number(match)
-        if number and number not in normalized:
-            normalized.append(number)
-    return normalized
+    """Extract phone numbers from text using strict Indian regex first,
+    then fall back to keyword-based extraction for spoken/partial numbers."""
+    seen: set[str] = set()
+    result: list[str] = []
+
+    # 1. Strict standard Indian phone numbers (10 digits, 6-9 prefix)
+    for match in _INDIAN_PHONE_RE.finditer(text or ""):
+        number = _normalize_phone_number(match.group(0))
+        if number and number not in seen:
+            seen.add(number)
+            result.append(number)
+
+    # 2. Spoken keyword fallback: "phone number 98989…" or "number 98989…"
+    if not result:
+        for m in _SPOKEN_PHONE_RE.finditer(text or ""):
+            digits = re.sub(r"\D", "", m.group(1))
+            if len(digits) < 7:
+                continue
+            normalized = _normalize_phone_number(digits)
+            value = normalized or digits
+            if value not in seen:
+                seen.add(value)
+                result.append(value)
+
+    return result
 
 
 def extract_from_text(text: str) -> dict:
@@ -221,11 +262,29 @@ def extract_from_text(text: str) -> dict:
         return dict(BUSINESS_CARD_SCHEMA)
 
     emails = _EMAIL_RE.findall(text)
-    websites = [w for w in _WEB_RE.findall(text) if "." in w and "@" not in w]
+
+    # Extract websites but exclude domains that are part of an email address.
+    email_domains = {e.split("@", 1)[1].lower() for e in emails if "@" in e}
+    websites = [
+        m.group(0)
+        for m in _WEB_RE.finditer(text)
+        if m.group(0).lstrip("http://").lstrip("https://").lstrip("www.").lower()
+        not in email_domains
+        and (m.start() == 0 or text[m.start() - 1] != "@")
+    ]
+
     phones = _extract_indian_phones(text)
 
-    designation = next((l for l in lines if any(h in l.lower() for h in _DESIGNATION_HINTS)), None)
-    company = next((l for l in lines if any(h in l.lower() for h in _COMPANY_HINTS)), None)
+    # Use word-boundary compiled regexes to avoid false positives like
+    # "lead" matching "create a lead for…" or "st" matching "customer".
+    designation = next(
+        (l for l in lines if _DESIGNATION_HINTS_WB.search(l) and len(l.split()) <= 8),
+        None,
+    )
+    company = next(
+        (l for l in lines if _COMPANY_HINTS_WB.search(l) and len(l.split()) <= 8),
+        None,
+    )
 
     inline_name = None
     # Handles phrases like: "customer Vipul", "name is Vipul", "my name is Vipul Shah"
@@ -256,10 +315,8 @@ def extract_from_text(text: str) -> dict:
             name = line
             break
 
-    address_lines = [
-        l for l in lines
-        if any(k in l.lower() for k in _ADDRESS_HINTS)
-    ]
+    # Use pre-compiled word-boundary regex — prevents "customer" matching "st", etc.
+    address_lines = [l for l in lines if _ADDRESS_HINTS_WB.search(l)]
 
     extracted = {
         "name": inline_name or name or capitalized_name,
