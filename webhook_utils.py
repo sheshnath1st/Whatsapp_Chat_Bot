@@ -337,7 +337,7 @@ async def llm_reply_to_text_v2(
                 sf_status = _salesforce_status_message(salesforce_result)
                 if sf_status:
                     message_content = f"{message_content}\n\n{sf_status}" if message_content else sf_status
-            
+
             print(f"LLM API message content: {message_content}")
             if message_content:
                 loop = asyncio.get_running_loop()
@@ -354,6 +354,8 @@ async def llm_reply_to_text_v2(
                             "send_result": send_result,
                         },
                     )
+                # --- ADDED LOGGING FOR MONGO ENTRY ---
+                print(f"[DEBUG] Attempting to log_event to MongoDB for user_phone={user_phone}, message_id={(send_result or {}).get('message_id')}, payload={message_content}")
                 log_event(
                     event_type="outgoing_message",
                     direction="outgoing",
@@ -368,8 +370,10 @@ async def llm_reply_to_text_v2(
                         "whatsapp_send_result": send_result,
                     },
                 )
+                print(f"[DEBUG] log_event to MongoDB completed for user_phone={user_phone}, message_id={(send_result or {}).get('message_id')}")
 
                 if salesforce_result:
+                    print(f"[DEBUG] Attempting to log_event (salesforce_sync) to MongoDB for user_phone={user_phone}, payload={salesforce_payload}")
                     log_event(
                         event_type="salesforce_sync",
                         direction="system",
@@ -380,6 +384,7 @@ async def llm_reply_to_text_v2(
                             "salesforce_result": salesforce_result,
                         },
                     )
+                    print(f"[DEBUG] log_event (salesforce_sync) to MongoDB completed for user_phone={user_phone}")
             else:
                 print("Error: Empty message content from LLM API")
                 log_failure(

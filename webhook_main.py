@@ -1,6 +1,9 @@
+import json
+
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from rich.pretty import data
 from webhook_utils import llm_reply_to_text_v2
 from conversation_store import log_event, log_failure
 from media_store import upload_whatsapp_media_to_s3
@@ -191,7 +194,8 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse(status_code=200, content={"status": "bad_request"})
 
     try:
-        print("Received webhook data:", data)
+        print("Received webhook data:")
+        print(json.dumps(data, indent=2))
         message_data = WhatsAppMessage(**data)
 
         if not message_data.entry:
@@ -199,7 +203,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
         handled_messages = 0
         handled_statuses = 0
-
+        
         for entry in message_data.entry:
             changes = entry.get("changes") or []
             for change_item in changes:

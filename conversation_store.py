@@ -1,3 +1,8 @@
+# Fetch recent conversation history for a phone number
+def get_conversation_history(phone: str, limit: int = 20):
+    """Return the most recent conversation events for a given phone number."""
+    collection = _get_collection()
+    return list(collection.find({"phone": phone}).sort("timestamp", -1).limit(limit))
 import os
 import threading
 from datetime import datetime, timezone
