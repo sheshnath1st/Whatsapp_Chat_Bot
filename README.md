@@ -97,6 +97,12 @@ GROQ_API_KEY=your_groq_api_key
 
 # Internal agent (defaults to http://127.0.0.1:5000)
 AGENT_URL=http://127.0.0.1:5000
+
+# Optional: Upload incoming WhatsApp image/audio media to S3
+S3_BUCKET_NAME=your_s3_bucket_name
+S3_PREFIX=whatsapp-media
+AWS_REGION=ap-south-1
+WHATSAPP_API_VERSION=v22.0
 ```
 
 

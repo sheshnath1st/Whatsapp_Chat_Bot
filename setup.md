@@ -164,5 +164,5 @@ postman request POST 'https://api.groq.com/openai/v1/chat/completions' \
 
 
 ps aux | grep uvicorn
-nohup uvicorn ec2_endpoints:app --host 0.0.0.0 --port 5000 > llm.log 2>&1 &
-nohup uvicorn webhook_main:app --host 0.0.0.0 --port 8000 > webhook.log 2>&1 &
+nohup python3 -m uvicorn ec2_endpoints:app --host 0.0.0.0 --port 5000 > llm.log 2>&1 &
+nohup python3 -m uvicorn webhook_main:app --host 0.0.0.0 --port 8000 > webhook.log 2>&1 &

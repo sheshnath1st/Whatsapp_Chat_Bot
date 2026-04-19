@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 from groq import Groq
 
 try:
@@ -42,6 +43,7 @@ OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL") or "gpt-4o-transcribe"
 GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL") or "whisper-large-v3-turbo"
 STT_LANGUAGE_HINT = (os.getenv("STT_LANGUAGE_HINT") or "").strip() or None
 STT_PROMPT = (os.getenv("STT_PROMPT") or "").strip() or None
+EXTRACTION_SOURCE = (os.getenv("EXTRACTION_SOURCE") or "whatsapp").strip().lower()
 BUSINESS_CARD_PYTHON_FIRST = (os.getenv("BUSINESS_CARD_PYTHON_FIRST") or "true").lower() == "true"
 BUSINESS_CARD_MIN_FIELDS = int(os.getenv("BUSINESS_CARD_MIN_FIELDS") or 3)
 LLM_FALLBACK_MIN_FIELDS = 3
@@ -60,63 +62,258 @@ WHISPER_CACHE_MODEL = (os.getenv("WHISPER_CACHE_MODEL") or "true").lower() == "t
 _whisper_model_cache: dict = {}
 
 BUSINESS_CARD_SCHEMA = {
-    "name": "",
-    "designation": "",
-    "company": "",
-    "phone": "",
-    "email": "",
-    "website": "",
-    "address": "",
+    "name": None,
+    "designation": None,
+    "company": None,
+    "phone": None,
+    "email": None,
+    "website": None,
+    "address": None,
 }
 
+
+def _new_extraction_schema() -> dict:
+    return {
+        "contact": {
+            "full_name": None,
+            "phone": None,
+            "email": None,
+            "company": None,
+            "designation": None,
+        },
+        "transcript": None,
+        "summary": None,
+        "intent": None,
+        "event": None,
+        "metadata": {
+            "source": "whatsapp",
+            "confidence_score": None,
+        },
+    }
+
 _TEXT_BUSINESS_CARD_SYSTEM_PROMPT = (
-    "Extract business card or lead details from text and return ONLY valid JSON.\n\n"
-    "Use exactly this schema:\n"
+    "You are a highly accurate AI data extraction and structuring engine.\n"
+    "Return ONLY strict valid JSON (no markdown, no extra text).\n"
+    "Handle multilingual input by understanding internally and writing output values in English where possible.\n"
+    "Normalize dates to ISO 8601 where possible.\n"
+    "If no event found, return event as null.\n"
+    "If contact fields are missing, set them to null.\n"
+    "Do not hallucinate missing values.\n\n"
+    "Return exactly this JSON schema:\n"
     '{\n'
-    '  "name": string or empty string,\n'
-    '  "designation": string or empty string,\n'
-    '  "company": string or empty string,\n'
-    '  "phone": string or empty string,\n'
-    '  "email": string or empty string,\n'
-    '  "website": string or empty string,\n'
-    '  "address": string or empty string\n'
+    '  "contact": {\n'
+    '    "full_name": string | null,\n'
+    '    "phone": string | null,\n'
+    '    "email": string | null,\n'
+    '    "company": string | null,\n'
+    '    "designation": string | null\n'
+    '  },\n'
+    '  "transcript": string | null,\n'
+    '  "summary": string | null,\n'
+    '  "intent": "buyer" | "agent" | "follow-up" | "inquiry" | null,\n'
+    '  "event": {\n'
+    '    "type": "call" | "meeting" | "email" | "follow_up" | null,\n'
+    '    "date": string | null,\n'
+    '    "time": string | null,\n'
+    '    "raw_text": string | null\n'
+    '  } | null,\n'
+    '  "metadata": {\n'
+    '    "source": "whatsapp" | "app" | "api",\n'
+    '    "confidence_score": number | null\n'
+    '  }\n'
     '}\n\n'
     "Rules:\n"
-    "- Return only the JSON object, with no markdown or explanation.\n"
-    "- Ignore reminders, follow-up instructions, tasks, dates, and CRM actions unless they contain one of the schema fields.\n"
-    "- Extract a clean person name only.\n"
-    "- Phone should contain digits, optionally with country code if explicitly present.\n"
-    "- Do not put full transcript sentences into designation, company, or address.\n"
-    "- If a field is missing, use an empty string \"\" instead of null.\n"
-    "- Do not add extra fields."
+    "- Keep confidence_score in range 0..1.\n"
+    "- Keep phone/email/company/name cleaned and normalized.\n"
+    "- Do not add any extra keys."
 )
 
 
 _NULL_LIKE_VALUES = {"", "null", "none", "n/a", "na", "nil", "unknown", "not available"}
+_UTC_OFFSET = "+00:00"
+_UTC_SUFFIX = "Z"
+_ALLOWED_SOURCES = {"whatsapp", "app", "api"}
+_ALLOWED_INTENTS = {"buyer", "agent", "follow-up", "inquiry"}
+_EVENT_TYPE_ALIASES = {
+    "follow-up": "follow_up",
+    "followup": "follow_up",
+    "follow_up": "follow_up",
+    "call": "call",
+    "meeting": "meeting",
+    "email": "email",
+}
 
 
 def _clean_field_value(value):
     if value is None:
-        return ""
+        return None
     if isinstance(value, str):
         cleaned = value.strip()
         if cleaned.lower() in _NULL_LIKE_VALUES:
-            return ""
-        return cleaned or ""
-    return value if value else ""
+            return None
+        return cleaned or None
+    return value if value else None
+
+
+def _normalize_iso8601(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace(_UTC_OFFSET, _UTC_SUFFIX)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    iso_candidate = text.replace(_UTC_SUFFIX, _UTC_OFFSET)
+    try:
+        dt = datetime.fromisoformat(iso_candidate)
+        if dt.tzinfo is None:
+            return dt.isoformat()
+        return dt.astimezone(timezone.utc).isoformat().replace(_UTC_OFFSET, _UTC_SUFFIX)
+    except Exception:
+        pass
+
+    formats = [
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y/%m/%d",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.isoformat()
+        except Exception:
+            continue
+    return None
 
 
 def normalize_output(data: dict) -> dict:
-    """Return strict schema output with cleaned values (null replaced with empty string)."""
+    """Return strict legacy entity schema output with cleaned values."""
     if not isinstance(data, dict):
         return dict(BUSINESS_CARD_SCHEMA)
 
     normalized = {}
     for key in BUSINESS_CARD_SCHEMA:
         value = _clean_field_value(data.get(key))
-        # Ensure all None values are converted to empty strings
-        normalized[key] = value if value is not None else ""
+        normalized[key] = value
     return normalized
+
+
+def _normalize_source(value: str | None) -> str:
+    source = _clean_field_value(value)
+    source = str(source).lower() if source else EXTRACTION_SOURCE
+    return source if source in _ALLOWED_SOURCES else "whatsapp"
+
+
+def _normalize_confidence(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        score = float(value)
+        if score < 0:
+            return 0.0
+        if score > 1:
+            return 1.0
+        return score
+    except Exception:
+        return None
+
+
+def _normalize_intent(value) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("primary")
+    intent = _clean_field_value(value)
+    if not intent:
+        return None
+    normalized = str(intent).strip().lower().replace("_", "-")
+    return normalized if normalized in _ALLOWED_INTENTS else None
+
+
+def _normalize_event(event_data) -> dict | None:
+    if not isinstance(event_data, dict):
+        return None
+
+    raw_type = _clean_field_value(event_data.get("type") or event_data.get("event_type"))
+    event_type = _EVENT_TYPE_ALIASES.get(str(raw_type).lower(), None) if raw_type else None
+    event_date = _normalize_iso8601(event_data.get("date") or event_data.get("event_date") or event_data.get("date_iso") or event_data.get("datetime"))
+    event_time = _clean_field_value(event_data.get("time") or event_data.get("event_time"))
+    raw_text = _clean_field_value(event_data.get("raw_text") or event_data.get("description") or event_data.get("title"))
+
+    normalized = {
+        "type": event_type,
+        "date": event_date,
+        "time": event_time,
+        "raw_text": raw_text,
+    }
+    return normalized if any(value is not None for value in normalized.values()) else None
+
+
+def _detect_input_type(source_type: str | None) -> str:
+    if source_type in {"ocr", "contact", "image"}:
+        return "business_card"
+    if source_type in {"transcript", "audio"}:
+        return "transcript"
+    return "mixed"
+
+
+def normalize_extraction_output(data: dict, source_type: str | None = None) -> dict:
+    """Normalize model output into required Salesforce-friendly schema with null defaults."""
+    schema = _new_extraction_schema()
+    schema["metadata"]["source"] = _normalize_source(
+        (data.get("metadata") or {}).get("source") if isinstance(data, dict) else None
+    )
+    if not isinstance(data, dict):
+        return schema
+
+    contact_src = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+    entities = data.get("entities") if isinstance(data.get("entities"), dict) else data
+    schema["contact"] = {
+        "full_name": _clean_field_value(contact_src.get("full_name") or entities.get("full_name") or entities.get("name")),
+        "phone": _clean_field_value(contact_src.get("phone") or entities.get("phone")),
+        "email": _clean_field_value(contact_src.get("email") or entities.get("email")),
+        "company": _clean_field_value(contact_src.get("company") or entities.get("company")),
+        "designation": _clean_field_value(contact_src.get("designation") or entities.get("designation")),
+    }
+
+    schema["transcript"] = _clean_field_value(data.get("transcript") or data.get("translated_text_en"))
+    schema["summary"] = _clean_field_value(data.get("summary"))
+    schema["intent"] = _normalize_intent(data.get("intent"))
+
+    event = _normalize_event(data.get("event"))
+    if event is None:
+        events = data.get("events") if isinstance(data.get("events"), list) else []
+        if events:
+            event = _normalize_event(events[0])
+    if event is None:
+        actions = data.get("actions") if isinstance(data.get("actions"), list) else []
+        if actions:
+            action = actions[0]
+            if isinstance(action, dict):
+                event = _normalize_event({
+                    "type": action.get("type"),
+                    "event_date": action.get("due_date_iso") or action.get("due_date") or action.get("date"),
+                    "raw_text": action.get("description"),
+                })
+    schema["event"] = event
+
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    intent_raw = data.get("intent") if isinstance(data.get("intent"), dict) else {}
+    confidence = metadata.get("confidence_score")
+    if confidence is None and isinstance(intent_raw, dict):
+        confidence = intent_raw.get("confidence")
+    schema["metadata"] = {
+        "source": _normalize_source(metadata.get("source") or source_type),
+        "confidence_score": _normalize_confidence(confidence),
+    }
+
+    return schema
 
 
 def merge_results(primary: dict, fallback: dict) -> dict:
@@ -126,7 +323,7 @@ def merge_results(primary: dict, fallback: dict) -> dict:
         # Prefer primary if it has a non-empty value, else use fallback
         primary_val = primary.get(key)
         fallback_val = fallback.get(key)
-        merged[key] = primary_val if (primary_val and primary_val != "") else fallback_val
+        merged[key] = primary_val if primary_val is not None else fallback_val
     return normalize_output(merged)
 
 
@@ -403,14 +600,16 @@ def _python_extract_from_image(image_base64: str) -> dict | None:
         return None
 
 
-def _call_business_card_llm(input_text: str = None, image_base64: str = None) -> dict | None:
+def _call_business_card_llm(input_text: str = None, image_base64: str = None, source_type: str | None = None) -> dict | None:
     """LLM extraction fallback. Returns parsed JSON dict or None."""
     if not input_text and not image_base64:
         return None
 
     try:
-        system_prompt = _TEXT_BUSINESS_CARD_SYSTEM_PROMPT if input_text else "Extract business card details and return ONLY JSON"
+        system_prompt = _TEXT_BUSINESS_CARD_SYSTEM_PROMPT
         raw_response = None
+
+        input_type = _detect_input_type(source_type)
 
         if image_base64:
             client = OpenAI(api_key=OPENAI_API_KEY)
@@ -419,7 +618,16 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None) ->
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract business card details and return ONLY JSON"},
+                        {
+                            "type": "text",
+                            "text": (
+                                f"INPUT_TYPE: {input_type}\n\n"
+                                "INPUT_DATA:\n[image attached]\n\n"
+                                "CONTEXT:\n- User interaction comes from WhatsApp or mobile app\n"
+                                "- Output will be sent to Salesforce\n"
+                                "- System should support follow-ups and event tracking"
+                            ),
+                        },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                     ],
                 },
@@ -430,7 +638,16 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None) ->
         else:
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Extract business card details and return ONLY JSON:\n{input_text}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"INPUT_TYPE: {input_type}\n\n"
+                        f"INPUT_DATA:\n{input_text}\n\n"
+                        "CONTEXT:\n- User interaction comes from WhatsApp or mobile app\n"
+                        "- Output will be sent to Salesforce\n"
+                        "- System should support follow-ups and event tracking"
+                    ),
+                },
             ]
             raw_response = _call_text_llm(messages)
 
@@ -443,53 +660,52 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None) ->
         return None
 
 
-def extract_business_card_details(input_text: str = None, image_base64: str = None) -> dict | None:
+def extract_business_card_details(input_text: str = None, image_base64: str = None, source_type: str | None = None) -> dict | None:
     """
-    Extract structured business card fields from text or image.
-
-    Returns a normalized dict with fixed keys, or None when extraction fails.
+    Extract structured data from text/OCR/transcript and return normalized JSON schema.
     """
     if not input_text and not image_base64:
         logger.error("extract_business_card_details called without text or image")
         return None
 
     try:
+        detected_source_type = source_type or ("ocr" if image_base64 else "text")
+
         if image_base64:
             logger.info("Business card extraction input type: image")
             python_result = _python_extract_from_image(image_base64) if BUSINESS_CARD_PYTHON_FIRST else dict(BUSINESS_CARD_SCHEMA)
             logger.info("Python extracted data: %s", python_result)
 
-            if python_result and _confident_field_count(python_result) >= LLM_FALLBACK_MIN_FIELDS:
-                final_python = normalize_output(python_result)
-                logger.info("Final merged JSON: %s", final_python)
-                return final_python
+            llm_parsed = _call_business_card_llm(image_base64=image_base64, source_type=detected_source_type)
+            normalized_output = normalize_extraction_output(llm_parsed or {}, source_type=detected_source_type)
+            contact = normalized_output.get("contact", {})
+            python_entities = normalize_output(python_result or {})
+            if contact.get("full_name") is None:
+                contact["full_name"] = python_entities.get("name")
+            for key in ["phone", "email", "company", "designation"]:
+                if contact.get(key) is None and python_entities.get(key) is not None:
+                    contact[key] = python_entities.get(key)
+            normalized_output["contact"] = contact
+            logger.info("Final normalized extraction JSON: %s", normalized_output)
+            return normalized_output
 
-            llm_parsed = _call_business_card_llm(image_base64=image_base64)
-            if not llm_parsed:
-                return None
-
-            llm_result = normalize_output(llm_parsed)
-            merged = merge_results(llm_result, python_result or {})
-            logger.info("Final merged JSON: %s", merged)
-            if _populated_field_count(merged) < SUCCESS_MIN_FIELDS:
-                logger.error("Extraction confidence too low (<2 fields)")
-                return None
-            return merged
-
-        # Audio/text flow: Python-first extraction with flat business-card schema.
-        logger.info("Business card extraction input type: audio-text")
+        # Audio/text/contact flow.
+        logger.info("Business card extraction input type: text")
         python_result = extract_from_text(input_text)
         logger.info("Python extracted data: %s", python_result)
 
-        llm_parsed = _call_business_card_llm(input_text=input_text)
-        llm_result = normalize_output(llm_parsed or {})
-        merged = merge_results(llm_result, python_result)
-        logger.info("Final merged JSON: %s", merged)
-
-        if _populated_field_count(merged) < SUCCESS_MIN_FIELDS:
-            logger.error("Extraction confidence too low (<2 fields)")
-            return None
-        return merged
+        llm_parsed = _call_business_card_llm(input_text=input_text, source_type=detected_source_type)
+        normalized_output = normalize_extraction_output(llm_parsed or {}, source_type=detected_source_type)
+        contact = normalized_output.get("contact", {})
+        python_entities = normalize_output(python_result)
+        if contact.get("full_name") is None:
+            contact["full_name"] = python_entities.get("name")
+        for key in ["phone", "email", "company", "designation"]:
+            if contact.get(key) is None and python_entities.get(key) is not None:
+                contact[key] = python_entities.get(key)
+        normalized_output["contact"] = contact
+        logger.info("Final normalized extraction JSON: %s", normalized_output)
+        return normalized_output
     except Exception as e:
         logger.exception("Business card extraction failed: %s", e)
         return None

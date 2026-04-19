@@ -2,8 +2,11 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from webhook_utils import llm_reply_to_text_v2
+from conversation_store import log_event, log_failure
+from media_store import upload_whatsapp_media_to_s3
 import logging
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +23,96 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 class WhatsAppMessage(BaseModel):
     object: str
     entry: list
+
+
+def _extract_user_message(message: dict) -> tuple[str, Optional[str], Optional[str]]:
+    """Return message text, media_id and detected kind."""
+    if "text" in message:
+        return (message.get("text", {}).get("body", "").lower(), None, None)
+    if "image" in message:
+        image = message.get("image", {}) or {}
+        return (image.get("caption", ""), image.get("id"), "image")
+    if message.get("audio"):
+        audio = message.get("audio", {}) or {}
+        return ("", audio.get("id"), "audio")
+    if message.get("contacts"):
+        contacts = message.get("contacts") or []
+        if contacts:
+            return (_contact_to_extraction_text(contacts[0]), None, "contact")
+    return ("", None, None)
+
+
+def _log_status_events(change: dict, incoming_phone_id: Optional[str]) -> int:
+    statuses = change.get("statuses") or []
+    count = 0
+    for status in statuses:
+        recipient = status.get("recipient_id")
+        msg_id = status.get("id")
+        status_value = status.get("status")
+        log_event(
+            event_type="message_status",
+            direction="outgoing",
+            phone=recipient,
+            message_id=msg_id,
+            payload={
+                "status": status_value,
+                "phone_number_id": incoming_phone_id,
+                "raw_status": status,
+            },
+        )
+        count += 1
+    return count
+
+
+def _process_incoming_messages(
+    *,
+    change: dict,
+    incoming_phone_id: Optional[str],
+    background_tasks: BackgroundTasks,
+) -> int:
+    handled_messages = 0
+    messages = change.get("messages") or []
+    for message in messages:
+        user_phone = message.get("from")
+        incoming_message_id = message.get("id")
+        user_message, media_id, kind = _extract_user_message(message)
+
+        log_event(
+            event_type="incoming_message",
+            direction="incoming",
+            phone=user_phone,
+            message_id=incoming_message_id,
+            payload={
+                "kind": kind or "text",
+                "text": user_message,
+                "media_id": media_id,
+                "phone_number_id": incoming_phone_id,
+                "raw_message": message,
+            },
+        )
+
+        background_tasks.add_task(
+            llm_reply_to_text_v2,
+            user_message,
+            user_phone,
+            media_id,
+            kind,
+            incoming_message_id,
+        )
+        if kind in {"audio", "image"} and media_id:
+            background_tasks.add_task(
+                upload_whatsapp_media_to_s3,
+                media_id,
+                kind,
+                incoming_message_id,
+                user_phone,
+            )
+        handled_messages += 1
+    return handled_messages
+
+
+def _is_ignored_phone(incoming_phone_id: Optional[str]) -> bool:
+    return bool(PHONE_NUMBER_ID and incoming_phone_id != PHONE_NUMBER_ID)
 
 
 def _contact_to_extraction_text(contact: dict) -> str:
@@ -90,6 +183,11 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         data = await request.json()
     except Exception as exc:
         logger.warning("Malformed webhook payload: %r", exc)
+        log_failure(
+            source="webhook_handler.parse_json",
+            error=str(exc),
+            payload={"detail": "Malformed webhook payload"},
+        )
         return JSONResponse(status_code=200, content={"status": "bad_request"})
 
     try:
@@ -99,48 +197,38 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         if not message_data.entry:
             return JSONResponse(status_code=200, content={"status": "no entry"})
 
-        changes = message_data.entry[0].get("changes") or []
-        if not changes:
-            return JSONResponse(status_code=200, content={"status": "no changes"})
+        handled_messages = 0
+        handled_statuses = 0
 
-        change = changes[0].get("value", {})
-        # ✅ FILTER: Only allow your business number
-        metadata = change.get("metadata", {})
-        incoming_phone_id = metadata.get("phone_number_id")
-        if incoming_phone_id != PHONE_NUMBER_ID:
-            print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
-            return JSONResponse(status_code=200, content={"status": "ignored"})
+        for entry in message_data.entry:
+            changes = entry.get("changes") or []
+            for change_item in changes:
+                change = change_item.get("value", {})
+                metadata = change.get("metadata", {})
+                incoming_phone_id = metadata.get("phone_number_id")
 
-        # ✅ Only process message events
-        if 'messages' not in change:
-            return JSONResponse(status_code=200, content={"status": "no message event"})
+                if _is_ignored_phone(incoming_phone_id):
+                    print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
+                    continue
 
-        print(f"Webhook change: {change}")
-        if 'messages' in change:
-            message = change["messages"][-1]
-            user_phone = message["from"]
-            print(message)
-            if "text" in message:
-                user_message = message["text"]["body"].lower()
-                print(user_message)
-                background_tasks.add_task(llm_reply_to_text_v2, user_message, user_phone, None, None)
-            elif "image" in message:
-                media_id = message["image"]["id"]
-                print(media_id)
-                caption = message["image"].get("caption", "")
-                background_tasks.add_task(llm_reply_to_text_v2, caption, user_phone, media_id, "image")
-            elif message.get("audio"):
-                media_id = message["audio"]["id"]
-                print(media_id)
-                background_tasks.add_task(llm_reply_to_text_v2, "", user_phone, media_id, "audio")
-            elif message.get("contacts"):
-                contacts = message.get("contacts") or []
-                if contacts:
-                    contact_text = _contact_to_extraction_text(contacts[0])
-                    background_tasks.add_task(llm_reply_to_text_v2, contact_text, user_phone, None, "contact")
+                handled_statuses += _log_status_events(change, incoming_phone_id)
+                handled_messages += _process_incoming_messages(
+                    change=change,
+                    incoming_phone_id=incoming_phone_id,
+                    background_tasks=background_tasks,
+                )
+
+        if handled_messages == 0 and handled_statuses == 0:
+            return JSONResponse(status_code=200, content={"status": "no_relevant_event"})
+
         return JSONResponse(status_code=200, content={"status": "ok"})
 
     except Exception as exc:
         logger.exception("Unhandled error in webhook_handler: %r", exc)
+        log_failure(
+            source="webhook_handler.unhandled",
+            error=str(exc),
+            payload={"webhook_payload": data if isinstance(data, dict) else {}},
+        )
         # Always return 200 so Meta does not retry the delivery.
         return JSONResponse(status_code=200, content={"status": "error"})

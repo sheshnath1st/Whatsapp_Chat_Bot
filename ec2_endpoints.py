@@ -77,7 +77,7 @@ async def api_llm_response(req: LLMRequest):
 
             logger.info("Image fetched and converted to base64 for extraction")
 
-            result = extract_business_card_details(image_base64=image_base64)
+            result = extract_business_card_details(image_base64=image_base64, source_type="ocr")
 
             if result is None:
                 logger.error("Business card extraction failed for image")
@@ -105,7 +105,7 @@ async def api_llm_response(req: LLMRequest):
                     content={"error": TRANSCRIPTION_FAILED_MSG},
                 )
 
-            result = extract_business_card_details(input_text=text_message)
+            result = extract_business_card_details(input_text=text_message, source_type="transcript")
 
             if result is None:
                 logger.error("Business card extraction failed for audio")
@@ -121,7 +121,7 @@ async def api_llm_response(req: LLMRequest):
 
             logger.info("Input type detected: contact")
 
-            result = extract_business_card_details(input_text=text_message)
+            result = extract_business_card_details(input_text=text_message, source_type="contact")
 
             if result is None:
                 logger.error("Business card extraction failed for contact")
