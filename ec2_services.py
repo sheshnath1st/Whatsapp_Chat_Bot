@@ -365,6 +365,35 @@ def safe_json_parse(response: str) -> dict | None:
     return None
 
 
+def extract_event_from_transcript(transcript: str) -> dict | None:
+    """Use LLM to extract calendar event details from an audio transcript."""
+    if not transcript or not transcript.strip():
+        return None
+
+    system_prompt = (
+        "Extract any scheduled event or follow-up action from this transcript. "
+        "Return ONLY a JSON object with these fields:\n"
+        '{"type": "call|meeting|email|follow_up|null", '
+        '"date": "YYYY-MM-DD or relative description or null", '
+        '"time": "HH:MM or null", '
+        '"raw_text": "the relevant excerpt or null"}\n'
+        "If no event is mentioned, set all values to null."
+    )
+
+    try:
+        raw = _call_text_llm([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": transcript},
+        ])
+        if not raw:
+            return None
+        parsed = safe_json_parse(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception as exc:
+        logger.warning("extract_event_from_transcript failed: %s", exc)
+        return None
+
+
 def _call_text_llm(messages: list[dict]) -> str | None:
     """Call configured text LLM provider (Groq/OpenAI) with chat messages."""
     try:

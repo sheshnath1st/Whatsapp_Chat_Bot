@@ -6,7 +6,13 @@ import requests
 import httpx
 from dotenv import load_dotenv
 from typing import Optional
-from conversation_store import log_event, log_failure
+from conversation_store import (
+    log_event,
+    log_failure,
+    store_pending_sf_context,
+    get_pending_sf_context,
+    clear_pending_sf_context,
+)
 
 load_dotenv()
 
@@ -181,6 +187,53 @@ def send_to_salesforce(business_card_data: dict):
         return {"ok": False, "error": str(exc)}
 
 
+def send_to_salesforce_update(sf_id: str, payload: dict):
+    """PATCH an existing Salesforce record with transcript and event data."""
+    if not SALESFORCE_API_URL:
+        print("Warning: SALESFORCE_API_URL not configured, skipping Salesforce update")
+        log_failure(
+            source="send_to_salesforce_update.not_configured",
+            error="salesforce_url_not_configured",
+            payload={"sf_id": sf_id, "payload": payload},
+        )
+        return {"ok": False, "error": "salesforce_url_not_configured"}
+
+    try:
+        url = f"{SALESFORCE_API_URL}/{sf_id}"
+        headers = {"Content-Type": JSON_CONTENT_TYPE}
+        if SALESFORCE_COOKIE:
+            headers["Cookie"] = SALESFORCE_COOKIE
+
+        print(f"Updating Salesforce record {sf_id}: {payload}")
+        response = requests.patch(url, headers=headers, json=payload, timeout=15)
+
+        response_body = None
+        try:
+            response_body = response.json()
+        except Exception:
+            response_body = response.text
+
+        if 200 <= response.status_code < 300:
+            print(f"Salesforce record {sf_id} updated successfully")
+            return {"ok": True, "status_code": response.status_code, "response": response_body}
+        else:
+            print(f"Salesforce update error (status {response.status_code}): {response.text}")
+            log_failure(
+                source="send_to_salesforce_update.api_error",
+                error="salesforce_api_error",
+                payload={"sf_id": sf_id, "status_code": response.status_code, "response": response_body},
+            )
+            return {"ok": False, "status_code": response.status_code, "error": "salesforce_api_error"}
+    except Exception as exc:
+        print(f"Error updating Salesforce record: {exc}")
+        log_failure(
+            source="send_to_salesforce_update.exception",
+            error=str(exc),
+            payload={"sf_id": sf_id, "payload": payload},
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
     if not salesforce_result:
         return ""
@@ -193,7 +246,7 @@ def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
 
 
 def _to_salesforce_payload(extracted_data: dict) -> Optional[dict]:
-    """Map normalized extraction output to legacy Salesforce contact fields."""
+    """Map normalized extraction output to Salesforce fields including transcript and event."""
     if not isinstance(extracted_data, dict):
         return None
 
@@ -209,7 +262,50 @@ def _to_salesforce_payload(extracted_data: dict) -> Optional[dict]:
     }
     if not any(payload.values()):
         return None
+
+    transcript = extracted_data.get("transcript")
+    if transcript:
+        payload["transcript"] = transcript
+
+    event = extracted_data.get("event")
+    if isinstance(event, dict) and any(event.values()):
+        payload["event"] = event
+
     return payload
+
+
+def _format_extraction_reply(data: dict, kind: Optional[str]) -> str:
+    """Format extracted card/audio data as a readable WhatsApp message."""
+    contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+    lines = []
+
+    name = contact.get("full_name") or contact.get("name")
+    if name:
+        lines.append(f"Name: {name}")
+    if contact.get("designation"):
+        lines.append(f"Designation: {contact['designation']}")
+    if contact.get("company"):
+        lines.append(f"Company: {contact['company']}")
+    if contact.get("phone"):
+        lines.append(f"Phone: {contact['phone']}")
+    if contact.get("email"):
+        lines.append(f"Email: {contact['email']}")
+    if contact.get("website"):
+        lines.append(f"Website: {contact['website']}")
+    if contact.get("address"):
+        lines.append(f"Address: {contact['address']}")
+
+    transcript = data.get("transcript")
+    if transcript and kind == "audio":
+        lines.append(f"\nTranscript: {transcript}")
+
+    event = data.get("event")
+    if isinstance(event, dict) and any(event.values()):
+        event_parts = [v for v in [event.get("type"), event.get("date"), event.get("time")] if v]
+        if event_parts:
+            lines.append(f"Event: {' | '.join(event_parts)}")
+
+    return "\n".join(lines) if lines else json.dumps(data, ensure_ascii=False)
 
 
 def send_audio_message(to: str, file_path: str):
@@ -265,6 +361,81 @@ def send_audio_message(to: str, file_path: str):
 
 
 
+async def _handle_audio_event_flow(
+    user_phone: str,
+    media_id: str,
+    incoming_message_id: str,
+    sf_context: dict,
+):
+    """Flow 1 step 6-9: User sent audio reply to a card scan. Transcribe, extract event, update SF."""
+    sf_id = sf_context["sf_id"]
+    headers = {"accept": "application/json", "Content-Type": "application/json"}
+    json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
+
+    print(f"[Flow1] Audio follow-up for SF record {sf_id}")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{AGENT_URL}/llm-response",
+            json=json_data,
+            headers=headers,
+            timeout=120,
+        )
+
+    if response.status_code != 200:
+        print(f"[Flow1] audio_event endpoint error: {response.status_code}")
+        await send_message_async(user_phone, "Could not process your voice message. Please try again.")
+        return
+
+    response_data = response.json()
+    result = response_data.get("response") or {}
+    transcript = result.get("transcript", "")
+    event = result.get("event") or {}
+
+    sf_update_payload = {"transcript": transcript}
+    if isinstance(event, dict) and any(event.values()):
+        sf_update_payload["event"] = event
+
+    loop = asyncio.get_running_loop()
+    sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
+
+    clear_pending_sf_context(user_phone)
+
+    event_summary = ""
+    if isinstance(event, dict) and event.get("type"):
+        parts = [event["type"]]
+        if event.get("date"):
+            parts.append(event["date"])
+        if event.get("time"):
+            parts.append(event["time"])
+        event_summary = f"\nEvent: {' | '.join(parts)}"
+
+    sf_status = "Salesforce record updated." if (sf_result or {}).get("ok") else "Salesforce update failed."
+    reply = f"Voice note received.\nTranscript: {transcript}{event_summary}\n\n{sf_status} (ID: {sf_id})"
+
+    send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
+    log_event(
+        event_type="outgoing_message",
+        direction="outgoing",
+        phone=user_phone,
+        message_id=(send_result or {}).get("message_id"),
+        related_message_id=incoming_message_id,
+        payload={
+            "kind": "audio_event",
+            "sf_id": sf_id,
+            "transcript": transcript,
+            "event": event,
+            "sf_result": sf_result,
+        },
+    )
+    log_event(
+        event_type="salesforce_sync",
+        direction="system",
+        phone=user_phone,
+        related_message_id=incoming_message_id,
+        payload={"sf_id": sf_id, "sf_update_payload": sf_update_payload, "sf_result": sf_result},
+    )
+
+
 async def llm_reply_to_text_v2(
     user_input: str,
     user_phone: str,
@@ -273,6 +444,13 @@ async def llm_reply_to_text_v2(
     incoming_message_id: str = None,
 ):
     try:
+        # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
+        if kind == "audio" and media_id:
+            sf_context = get_pending_sf_context(user_phone)
+            if sf_context:
+                await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
+                return
+
         headers = {
             "accept": "application/json",
             "Content-Type": "application/json",
@@ -293,7 +471,6 @@ async def llm_reply_to_text_v2(
             )
 
         if response.status_code == 200 and response.headers.get("content-type", "").startswith("audio"):
-            # Audio payload (kind == "audio")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
                 temp_file.write(response.content)
                 temp_path = temp_file.name
@@ -307,10 +484,7 @@ async def llm_reply_to_text_v2(
                     phone=user_phone,
                     message_id=(send_result or {}).get("message_id"),
                     related_message_id=incoming_message_id,
-                    payload={
-                        "kind": "audio",
-                        "whatsapp_send_result": send_result,
-                    },
+                    payload={"kind": "audio", "whatsapp_send_result": send_result},
                 )
             finally:
                 try:
@@ -325,37 +499,48 @@ async def llm_reply_to_text_v2(
             message_content = response_data.get("response")
             salesforce_payload = None
             salesforce_result = None
-            
-            # Check if response contains business card data (from audio/image/contact extraction)
+
             if isinstance(message_content, dict):
                 salesforce_payload = _to_salesforce_payload(message_content)
-                message_content = json.dumps(message_content, ensure_ascii=False)
+                message_content_str = _format_extraction_reply(message_content, kind)
+            else:
+                message_content_str = message_content
 
             if salesforce_payload:
                 loop = asyncio.get_running_loop()
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
-                if sf_status:
-                    message_content = f"{message_content}\n\n{sf_status}" if message_content else sf_status
 
-            print(f"LLM API message content: {message_content}")
-            if message_content:
+                # Flow 1: after image card sync, store SF ID so the user can follow up with voice
+                if kind == "image" and salesforce_result and salesforce_result.get("ok"):
+                    sf_id = salesforce_result.get("salesforce_id")
+                    if sf_id:
+                        store_pending_sf_context(
+                            user_phone,
+                            sf_id,
+                            message_content if isinstance(message_content, dict) else {},
+                        )
+                        sf_status = (
+                            f"{sf_status}\nSalesforce ID: {sf_id}"
+                            f"\n\nReply with a voice note to add a follow-up event to this record."
+                        )
+
+                if sf_status:
+                    message_content_str = f"{message_content_str}\n\n{sf_status}" if message_content_str else sf_status
+
+            print(f"LLM API message content: {message_content_str}")
+            if message_content_str:
                 loop = asyncio.get_running_loop()
-                print(f"Sending message to {user_phone}: {message_content}")
-                send_result = await loop.run_in_executor(None, send_message, user_phone, message_content)
+                print(f"Sending message to {user_phone}: {message_content_str}")
+                send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str)
                 if not (send_result or {}).get("ok"):
                     log_failure(
                         source="llm_reply_to_text_v2.send_message_failed",
                         error=(send_result or {}).get("error", "whatsapp_send_failed"),
                         phone=user_phone,
                         related_message_id=incoming_message_id,
-                        payload={
-                            "reply": message_content,
-                            "send_result": send_result,
-                        },
+                        payload={"reply": message_content_str, "send_result": send_result},
                     )
-                # --- ADDED LOGGING FOR MONGO ENTRY ---
-                print(f"[DEBUG] Attempting to log_event to MongoDB for user_phone={user_phone}, message_id={(send_result or {}).get('message_id')}, payload={message_content}")
                 log_event(
                     event_type="outgoing_message",
                     direction="outgoing",
@@ -364,16 +549,14 @@ async def llm_reply_to_text_v2(
                     related_message_id=incoming_message_id,
                     payload={
                         "kind": kind or "text",
-                        "reply": message_content,
+                        "reply": message_content_str,
                         "salesforce_payload": salesforce_payload,
                         "salesforce_result": salesforce_result,
                         "whatsapp_send_result": send_result,
                     },
                 )
-                print(f"[DEBUG] log_event to MongoDB completed for user_phone={user_phone}, message_id={(send_result or {}).get('message_id')}")
 
                 if salesforce_result:
-                    print(f"[DEBUG] Attempting to log_event (salesforce_sync) to MongoDB for user_phone={user_phone}, payload={salesforce_payload}")
                     log_event(
                         event_type="salesforce_sync",
                         direction="system",
@@ -384,7 +567,6 @@ async def llm_reply_to_text_v2(
                             "salesforce_result": salesforce_result,
                         },
                     )
-                    print(f"[DEBUG] log_event (salesforce_sync) to MongoDB completed for user_phone={user_phone}")
             else:
                 print("Error: Empty message content from LLM API")
                 log_failure(
@@ -402,10 +584,7 @@ async def llm_reply_to_text_v2(
                 error="invalid_llm_response",
                 phone=user_phone,
                 related_message_id=incoming_message_id,
-                payload={
-                    "status_code": response.status_code,
-                    "response_data": response_data,
-                },
+                payload={"status_code": response.status_code, "response_data": response_data},
             )
             await send_message_async(user_phone, "Failed to process message due to an internal server error.")
 
@@ -416,11 +595,7 @@ async def llm_reply_to_text_v2(
             error=str(e),
             phone=user_phone,
             related_message_id=incoming_message_id,
-            payload={
-                "user_input": user_input,
-                "media_id": media_id,
-                "kind": kind,
-            },
+            payload={"user_input": user_input, "media_id": media_id, "kind": kind},
         )
         try:
             await send_message_async(user_phone, "Sorry, something went wrong while generating a response.")

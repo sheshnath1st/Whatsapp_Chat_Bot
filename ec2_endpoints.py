@@ -8,6 +8,7 @@ from ec2_services import (
     handle_image_message,
     handle_audio_message,
     extract_business_card_details,
+    extract_event_from_transcript,
 )
 from enum import Enum
 
@@ -45,6 +46,7 @@ class KindEnum(str, Enum):
     audio = "audio"
     image = "image"
     contact = "contact"
+    audio_event = "audio_event"
 
 class LLMRequest(BaseModel):
     user_input: str
@@ -114,7 +116,34 @@ async def api_llm_response(req: LLMRequest):
                     content={"error": EXTRACTION_FAILED_MSG},
                 )
 
+            # Flow 2: always preserve raw transcript and ensure event is extracted
+            if not result.get("transcript"):
+                result["transcript"] = text_message
+            if not result.get("event"):
+                result["event"] = extract_event_from_transcript(text_message)
+
             logger.info(f"Business card extracted JSON: {result}")
+            return {"response": result, "error": None}
+
+        elif req.kind == KindEnum.audio_event:
+
+            logger.info("Input type detected: audio_event (event extraction only)")
+
+            text_message = await handle_audio_message(req.media_id)
+
+            logger.info(f"Transcription: {text_message}")
+
+            if not text_message or not text_message.strip():
+                logger.error("Audio transcription returned empty text")
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": TRANSCRIPTION_FAILED_MSG},
+                )
+
+            event = extract_event_from_transcript(text_message) or {}
+            result = {"transcript": text_message, "event": event}
+
+            logger.info(f"Event extracted from transcript: {result}")
             return {"response": result, "error": None}
 
         elif req.kind == KindEnum.contact:

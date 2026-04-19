@@ -1,8 +1,3 @@
-# Fetch recent conversation history for a phone number
-def get_conversation_history(phone: str, limit: int = 20):
-    """Return the most recent conversation events for a given phone number."""
-    collection = _get_collection()
-    return list(collection.find({"phone": phone}).sort("timestamp", -1).limit(limit))
 import os
 import threading
 from datetime import datetime, timezone
@@ -11,46 +6,44 @@ from typing import Any, Optional
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
-_LOCK = threading.Lock()
-_CLIENT: Optional[MongoClient] = None
-
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "whatsapp_bot")
 MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "conversation_events")
 MONGODB_FAILURE_COLLECTION = os.getenv("MONGODB_FAILURE_COLLECTION", "conversation_failures")
+_SF_CONTEXT_COLLECTION = os.getenv("MONGODB_SF_CONTEXT_COLLECTION", "pending_sf_contexts")
+_SF_CONTEXT_TTL_SECONDS = int(os.getenv("SF_CONTEXT_TTL_SECONDS", "86400"))
+
+_LOCK = threading.Lock()
+_CLIENT: Optional[MongoClient] = None
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_collection():
-    """Return MongoDB collection for conversation events."""
+def _get_client() -> MongoClient:
     global _CLIENT
-
     if not MONGODB_URI:
         raise RuntimeError("MONGODB_URI is not configured")
-
     if _CLIENT is None:
         _CLIENT = MongoClient(MONGODB_URI)
         _CLIENT.admin.command("ping")
+    return _CLIENT
 
-    return _CLIENT[MONGODB_DB][MONGODB_COLLECTION]
+
+def _get_collection():
+    return _get_client()[MONGODB_DB][MONGODB_COLLECTION]
 
 
 def _get_failure_collection():
-    """Return MongoDB collection for failure events."""
-    global _CLIENT
+    return _get_client()[MONGODB_DB][MONGODB_FAILURE_COLLECTION]
 
-    if not MONGODB_URI:
-        raise RuntimeError("MONGODB_URI is not configured")
 
-    if _CLIENT is None:
-        _CLIENT = MongoClient(MONGODB_URI)
-        _CLIENT.admin.command("ping")
+def _get_sf_context_collection():
+    return _get_client()[MONGODB_DB][_SF_CONTEXT_COLLECTION]
 
-    return _CLIENT[MONGODB_DB][MONGODB_FAILURE_COLLECTION]
 
+# ── Event logging ─────────────────────────────────────────────────────────────
 
 def log_event(
     *,
@@ -71,13 +64,10 @@ def log_event(
         "related_message_id": related_message_id,
         "payload": payload or {},
     }
-
     with _LOCK:
         try:
-            collection = _get_collection()
-            collection.insert_one(record)
+            _get_collection().insert_one(record)
         except (RuntimeError, PyMongoError) as exc:
-            # Keep webhook flow alive even if MongoDB is temporarily unavailable.
             print(f"MongoDB log_event failed: {exc}")
 
 
@@ -100,11 +90,68 @@ def log_failure(
         "related_message_id": related_message_id,
         "payload": payload or {},
     }
-
     with _LOCK:
         try:
-            collection = _get_failure_collection()
-            collection.insert_one(record)
+            _get_failure_collection().insert_one(record)
         except (RuntimeError, PyMongoError) as exc:
-            # Keep runtime alive even if failure logging is unavailable.
             print(f"MongoDB log_failure failed: {exc}")
+
+
+def get_conversation_history(phone: str, limit: int = 20):
+    """Return the most recent conversation events for a given phone number."""
+    return list(
+        _get_collection()
+        .find({"phone": phone})
+        .sort("timestamp", -1)
+        .limit(limit)
+    )
+
+
+# ── Pending Salesforce context (Flow 1) ───────────────────────────────────────
+
+def store_pending_sf_context(phone: str, sf_id: str, card_json: dict) -> None:
+    """Upsert pending SF context for a user so a follow-up voice note can update the record."""
+    with _LOCK:
+        try:
+            _get_sf_context_collection().update_one(
+                {"phone": phone},
+                {"$set": {
+                    "phone": phone,
+                    "sf_id": sf_id,
+                    "card_json": card_json,
+                    "created_at": _utc_now_iso(),
+                }},
+                upsert=True,
+            )
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB store_pending_sf_context failed: {exc}")
+
+
+def get_pending_sf_context(phone: str) -> Optional[dict]:
+    """Return pending SF context if it exists and is within TTL, else None."""
+    with _LOCK:
+        try:
+            col = _get_sf_context_collection()
+            doc = col.find_one({"phone": phone})
+            if not doc:
+                return None
+            created_at = doc.get("created_at")
+            if created_at:
+                created_dt = datetime.fromisoformat(created_at)
+                age = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                if age > _SF_CONTEXT_TTL_SECONDS:
+                    col.delete_one({"phone": phone})
+                    return None
+            return {"sf_id": doc.get("sf_id"), "card_json": doc.get("card_json")}
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB get_pending_sf_context failed: {exc}")
+            return None
+
+
+def clear_pending_sf_context(phone: str) -> None:
+    """Delete pending SF context after the follow-up voice note has been processed."""
+    with _LOCK:
+        try:
+            _get_sf_context_collection().delete_one({"phone": phone})
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB clear_pending_sf_context failed: {exc}")
