@@ -804,8 +804,6 @@ def speech_to_text(input_path: str) -> str:
                         fp16=False,
                         language=STT_LANGUAGE_HINT,
                         temperature=0,
-                        best_of=5,
-                        beam_size=5,
                         initial_prompt=initial_prompt,
                     )
                     text = (result.get("text") or "").strip()
@@ -890,13 +888,9 @@ def _prepare_audio_for_stt(input_path: str) -> str:
         "-y",
         "-i",
         input_path,
-        "-af",
-        "highpass=f=200,lowpass=f=3000",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-vn",
+        "-ac", "1",       # mono
+        "-ar", "16000",   # 16 kHz — Whisper's native sample rate
+        "-vn",            # no video stream
         normalized_path,
     ]
     try:

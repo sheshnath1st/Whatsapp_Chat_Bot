@@ -12,6 +12,7 @@ MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "conversation_events")
 MONGODB_FAILURE_COLLECTION = os.getenv("MONGODB_FAILURE_COLLECTION", "conversation_failures")
 _SF_CONTEXT_COLLECTION = os.getenv("MONGODB_SF_CONTEXT_COLLECTION", "pending_sf_contexts")
 _SF_CONTEXT_TTL_SECONDS = int(os.getenv("SF_CONTEXT_TTL_SECONDS", "86400"))
+_CONTACTS_COLLECTION = os.getenv("MONGODB_CONTACTS_COLLECTION", "contacts")
 
 _LOCK = threading.Lock()
 _CLIENT: Optional[MongoClient] = None
@@ -41,6 +42,10 @@ def _get_failure_collection():
 
 def _get_sf_context_collection():
     return _get_client()[MONGODB_DB][_SF_CONTEXT_COLLECTION]
+
+
+def _get_contacts_collection():
+    return _get_client()[MONGODB_DB][_CONTACTS_COLLECTION]
 
 
 # ── Event logging ─────────────────────────────────────────────────────────────
@@ -155,3 +160,72 @@ def clear_pending_sf_context(phone: str) -> None:
             _get_sf_context_collection().delete_one({"phone": phone})
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB clear_pending_sf_context failed: {exc}")
+
+
+# ── Contacts store ────────────────────────────────────────────────────────────
+
+def save_contact(
+    *,
+    phone: str,
+    extracted_data: dict,
+    sf_id: Optional[str] = None,
+    source: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> None:
+    """
+    Upsert an extracted contact record into the contacts collection.
+    Called after every successful image / audio / contact extraction.
+    """
+    contact = extracted_data.get("contact") if isinstance(extracted_data.get("contact"), dict) else {}
+    now = _utc_now_iso()
+    record = {
+        "phone": phone,
+        "sf_id": sf_id,
+        "source": source,
+        "message_id": message_id,
+        "contact": contact,
+        "transcript": extracted_data.get("transcript"),
+        "event": extracted_data.get("event"),
+        "intent": extracted_data.get("intent"),
+        "metadata": extracted_data.get("metadata"),
+        "updated_at": now,
+    }
+    with _LOCK:
+        try:
+            col = _get_contacts_collection()
+            col.update_one(
+                {"phone": phone, "message_id": message_id},
+                {"$set": record, "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+            print(f"[MongoDB] contact saved for phone={phone} sf_id={sf_id}")
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB save_contact failed: {exc}")
+
+
+def update_contact_event(
+    *,
+    phone: str,
+    sf_id: str,
+    transcript: str,
+    event: Optional[dict],
+) -> None:
+    """
+    Update an existing contact record with transcript and event after a voice follow-up (Flow 1).
+    Matches by sf_id so the correct card record is updated.
+    """
+    now = _utc_now_iso()
+    with _LOCK:
+        try:
+            col = _get_contacts_collection()
+            col.update_one(
+                {"phone": phone, "sf_id": sf_id},
+                {"$set": {
+                    "transcript": transcript,
+                    "event": event,
+                    "updated_at": now,
+                }},
+            )
+            print(f"[MongoDB] contact event updated for phone={phone} sf_id={sf_id}")
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB update_contact_event failed: {exc}")

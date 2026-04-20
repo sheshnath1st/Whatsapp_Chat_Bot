@@ -12,6 +12,8 @@ from conversation_store import (
     store_pending_sf_context,
     get_pending_sf_context,
     clear_pending_sf_context,
+    save_contact,
+    update_contact_event,
 )
 
 load_dotenv()
@@ -400,6 +402,14 @@ async def _handle_audio_event_flow(
 
     clear_pending_sf_context(user_phone)
 
+    # Save transcript + event to MongoDB contacts collection (Flow 1 follow-up)
+    update_contact_event(
+        phone=user_phone,
+        sf_id=sf_id,
+        transcript=transcript,
+        event=event if isinstance(event, dict) and any(event.values()) else None,
+    )
+
     event_summary = ""
     if isinstance(event, dict) and event.get("type"):
         parts = [event["type"]]
@@ -510,6 +520,16 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
+
+                # Save extracted contact to MongoDB for all media kinds
+                if isinstance(message_content, dict):
+                    loop.run_in_executor(None, lambda: save_contact(
+                        phone=user_phone,
+                        extracted_data=message_content,
+                        sf_id=(salesforce_result or {}).get("salesforce_id"),
+                        source=kind,
+                        message_id=incoming_message_id,
+                    ))
 
                 # Flow 1: after image card sync, store SF ID so the user can follow up with voice
                 if kind == "image" and salesforce_result and salesforce_result.get("ok"):
