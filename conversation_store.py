@@ -3,8 +3,11 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+
+load_dotenv()
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "whatsapp_bot")

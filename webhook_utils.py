@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import tempfile
 import json
@@ -144,6 +145,7 @@ def send_to_salesforce(business_card_data: dict):
             response_body = response.text
 
         salesforce_id = None
+        print(f"Salesforce response body: {response_body}")
         if isinstance(response_body, dict):
             salesforce_id = (
                 response_body.get("id")
@@ -152,6 +154,12 @@ def send_to_salesforce(business_card_data: dict):
                 or response_body.get("salesforce_id")
                 or response_body.get("sf_id")
             )
+        # Fallback: extract Salesforce ID from plain-string responses
+        # e.g. "Lead created successfully with Id: 00Qa3001FA0Mt64EYC"
+        if not salesforce_id and isinstance(response_body, str):
+            match = re.search(r'\b([A-Za-z0-9]{15,18})\b', response_body)
+            if match:
+                salesforce_id = match.group(1)
         
         if 200 <= response.status_code < 300:
             print("Business card data sent to Salesforce successfully")
@@ -237,20 +245,27 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
 
 
 def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
+    """Always include SF ID in the status string so it reaches the WhatsApp reply."""
     if not salesforce_result:
         return ""
+    sf_id = salesforce_result.get("salesforce_id")
     if salesforce_result.get("ok"):
-        sf_id = salesforce_result.get("salesforce_id")
         if sf_id:
-            return f"Salesforce updated successfully. Record ID: {sf_id}"
+            return f"Salesforce ID: {sf_id}"
         return "Salesforce updated successfully."
-    return "Salesforce update failed."
+    error = salesforce_result.get("error", "unknown error")
+    return f"Salesforce update failed: {error}"
 
 
 def _to_salesforce_payload(extracted_data: dict) -> Optional[dict]:
     """Map normalized extraction output to Salesforce fields including transcript and event."""
     if not isinstance(extracted_data, dict):
         return None
+
+    # Prefer pre-built salesforce_payload from LLM output when available
+    sf_payload = extracted_data.get("salesforce_payload")
+    if isinstance(sf_payload, dict) and any(sf_payload.values()):
+        return sf_payload
 
     contact = extracted_data.get("contact") if isinstance(extracted_data.get("contact"), dict) else extracted_data
     payload = {
@@ -303,7 +318,13 @@ def _format_extraction_reply(data: dict, kind: Optional[str]) -> str:
 
     event = data.get("event")
     if isinstance(event, dict) and any(event.values()):
-        event_parts = [v for v in [event.get("type"), event.get("date"), event.get("time")] if v]
+        event_parts = [
+            v for v in [
+                event.get("event_type") or event.get("type"),
+                event.get("due_date") or event.get("date"),
+                event.get("due_time") or event.get("time"),
+            ] if v and str(v).lower() != "none"
+        ]
         if event_parts:
             lines.append(f"Event: {' | '.join(event_parts)}")
 
@@ -411,13 +432,17 @@ async def _handle_audio_event_flow(
     )
 
     event_summary = ""
-    if isinstance(event, dict) and event.get("type"):
-        parts = [event["type"]]
-        if event.get("date"):
-            parts.append(event["date"])
-        if event.get("time"):
-            parts.append(event["time"])
-        event_summary = f"\nEvent: {' | '.join(parts)}"
+    if isinstance(event, dict):
+        event_type = event.get("event_type") or event.get("type")
+        event_date = event.get("due_date") or event.get("date")
+        event_time = event.get("due_time") or event.get("time")
+        if event_type and str(event_type).lower() != "none":
+            parts = [event_type]
+            if event_date:
+                parts.append(event_date)
+            if event_time:
+                parts.append(event_time)
+            event_summary = f"\nEvent: {' | '.join(parts)}"
 
     sf_status = "Salesforce record updated." if (sf_result or {}).get("ok") else "Salesforce update failed."
     reply = f"Voice note received.\nTranscript: {transcript}{event_summary}\n\n{sf_status} (ID: {sf_id})"
@@ -519,31 +544,35 @@ async def llm_reply_to_text_v2(
             if salesforce_payload:
                 loop = asyncio.get_running_loop()
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
+
+                # Write SF ID back into the payload so every save/log/reply carries it
+                sf_id = (salesforce_result or {}).get("salesforce_id")
+                if sf_id:
+                    salesforce_payload["salesforce_id"] = sf_id
+
                 sf_status = _salesforce_status_message(salesforce_result)
 
-                # Save extracted contact to MongoDB for all media kinds
+                # Save extracted contact + SF ID to MongoDB
                 if isinstance(message_content, dict):
+                    _contact_data = dict(message_content)
+                    if sf_id:
+                        _contact_data["salesforce_id"] = sf_id
                     loop.run_in_executor(None, lambda: save_contact(
                         phone=user_phone,
-                        extracted_data=message_content,
-                        sf_id=(salesforce_result or {}).get("salesforce_id"),
+                        extracted_data=_contact_data,
+                        sf_id=sf_id,
                         source=kind,
                         message_id=incoming_message_id,
                     ))
 
                 # Flow 1: after image card sync, store SF ID so the user can follow up with voice
-                if kind == "image" and salesforce_result and salesforce_result.get("ok"):
-                    sf_id = salesforce_result.get("salesforce_id")
-                    if sf_id:
-                        store_pending_sf_context(
-                            user_phone,
-                            sf_id,
-                            message_content if isinstance(message_content, dict) else {},
-                        )
-                        sf_status = (
-                            f"{sf_status}\nSalesforce ID: {sf_id}"
-                            f"\n\nReply with a voice note to add a follow-up event to this record."
-                        )
+                if kind == "image" and salesforce_result and salesforce_result.get("ok") and sf_id:
+                    store_pending_sf_context(
+                        user_phone,
+                        sf_id,
+                        message_content if isinstance(message_content, dict) else {},
+                    )
+                    sf_status = f"{sf_status}\nReply with a voice note to add a follow-up event."
 
                 if sf_status:
                     message_content_str = f"{message_content_str}\n\n{sf_status}" if message_content_str else sf_status
@@ -569,6 +598,7 @@ async def llm_reply_to_text_v2(
                     related_message_id=incoming_message_id,
                     payload={
                         "kind": kind or "text",
+                        "sf_id": (salesforce_result or {}).get("salesforce_id"),
                         "reply": message_content_str,
                         "salesforce_payload": salesforce_payload,
                         "salesforce_result": salesforce_result,
@@ -577,12 +607,15 @@ async def llm_reply_to_text_v2(
                 )
 
                 if salesforce_result:
+                    _sf_id = (salesforce_result or {}).get("salesforce_id")
                     log_event(
                         event_type="salesforce_sync",
                         direction="system",
                         phone=user_phone,
                         related_message_id=incoming_message_id,
                         payload={
+                            "sf_id": _sf_id,
+                            "kind": kind,
                             "salesforce_payload": salesforce_payload,
                             "salesforce_result": salesforce_result,
                         },

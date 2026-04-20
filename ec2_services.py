@@ -91,42 +91,119 @@ def _new_extraction_schema() -> dict:
         },
     }
 
-_TEXT_BUSINESS_CARD_SYSTEM_PROMPT = (
-    "You are a highly accurate AI data extraction and structuring engine.\n"
-    "Return ONLY strict valid JSON (no markdown, no extra text).\n"
-    "Handle multilingual input by understanding internally and writing output values in English where possible.\n"
-    "Normalize dates to ISO 8601 where possible.\n"
-    "If no event found, return event as null.\n"
-    "If contact fields are missing, set them to null.\n"
-    "Do not hallucinate missing values.\n\n"
-    "Return exactly this JSON schema:\n"
-    '{\n'
-    '  "contact": {\n'
-    '    "full_name": string | null,\n'
-    '    "phone": string | null,\n'
-    '    "email": string | null,\n'
-    '    "company": string | null,\n'
-    '    "designation": string | null\n'
-    '  },\n'
-    '  "transcript": string | null,\n'
-    '  "summary": string | null,\n'
-    '  "intent": "buyer" | "agent" | "follow-up" | "inquiry" | null,\n'
-    '  "event": {\n'
-    '    "type": "call" | "meeting" | "email" | "follow_up" | null,\n'
-    '    "date": string | null,\n'
-    '    "time": string | null,\n'
-    '    "raw_text": string | null\n'
-    '  } | null,\n'
-    '  "metadata": {\n'
-    '    "source": "whatsapp" | "app" | "api",\n'
-    '    "confidence_score": number | null\n'
-    '  }\n'
-    '}\n\n'
-    "Rules:\n"
-    "- Keep confidence_score in range 0..1.\n"
-    "- Keep phone/email/company/name cleaned and normalized.\n"
-    "- Do not add any extra keys."
-)
+_EXTRACTION_PROMPT_TEMPLATE = """\
+You are an AI system that processes WhatsApp user inputs and converts them into structured CRM data for Salesforce.
+
+You must extract:
+1. Contact details
+2. Full transcript (if audio)
+3. Actionable event (if present)
+
+Return ONLY valid JSON. No explanation, no markdown.
+
+---
+
+CURRENT DATE: {current_date}
+
+INPUT TYPE:
+{input_type}
+(allowed values: "image_text", "audio_text", "text")
+
+INPUT:
+\"\"\"
+{input_text}
+\"\"\"
+
+CONTEXT:
+{{
+  "user": "{user}",
+  "sf_id": "{sf_id}"
+}}
+
+---
+
+OUTPUT FORMAT:
+
+{{
+  "contact": {{
+    "name": "",
+    "designation": null,
+    "company": null,
+    "phone": "",
+    "email": null,
+    "website": null,
+    "address": null
+  }},
+  "transcript": "",
+  "event": {{
+    "event_type": "",
+    "due_date": "",
+    "due_time": null,
+    "note": ""
+  }},
+  "salesforce_payload": {{
+    "name": "",
+    "designation": null,
+    "company": null,
+    "phone": "",
+    "email": null,
+    "website": null,
+    "address": null,
+    "transcript": "",
+    "event": {{
+      "event_type": "",
+      "due_date": "",
+      "due_time": null,
+      "note": ""
+    }}
+  }},
+  "meta": {{
+    "intent": "",
+    "confidence": 0.0
+  }}
+}}
+
+---
+
+RULES:
+
+### CONTACT EXTRACTION
+- Extract: name, phone, email, company, designation, website, address
+- The input may be a spoken command like "Create a lead for Whipple, phone 9898 98632"
+  → extract the contact BEING DESCRIBED, not the instruction verbs (create/add/save)
+- Phone: digits only, no +91, no spaces, no dashes
+- Normalize spoken email: "name at domain dot com" → "name@domain.com"
+- Normalize spoken phone: "9 8 9 8 comma 9 8 6 3 2" → "9898986 32" → "989898632"
+- If not available → null
+
+### TRANSCRIPT
+- If INPUT TYPE = audio_text → set transcript to full input text verbatim
+- Otherwise → null
+
+### EVENT EXTRACTION
+Detect intent: call, meeting, email, follow_up, reminder
+Convert relative dates using CURRENT DATE above:
+- "tomorrow" → CURRENT_DATE + 1 day
+- "after 2 days" → CURRENT_DATE + 2 days
+- "next week" → CURRENT_DATE + 7 days
+- "three days from today" → CURRENT_DATE + 3 days
+If no event found → event_type = "none", due_date = null
+
+### SALESFORCE PAYLOAD
+- Must EXACTLY match the output structure shown above
+- Copy all contact fields into salesforce_payload
+- Include transcript and event inside salesforce_payload
+- Never remove keys — use null if value is missing
+
+### META
+- intent = short summary e.g. "create_contact", "schedule_call", "update_lead"
+- confidence = 0.0 to 1.0
+
+### STRICT RULES
+- No hallucination
+- No extra text outside JSON
+- JSON only
+"""
 
 
 _NULL_LIKE_VALUES = {"", "null", "none", "n/a", "na", "nil", "unknown", "not available"}
@@ -241,10 +318,19 @@ def _normalize_event(event_data) -> dict | None:
         return None
 
     raw_type = _clean_field_value(event_data.get("type") or event_data.get("event_type"))
+    # treat "none" sentinel from template as absent
+    if raw_type and str(raw_type).lower() == "none":
+        raw_type = None
     event_type = _EVENT_TYPE_ALIASES.get(str(raw_type).lower(), None) if raw_type else None
-    event_date = _normalize_iso8601(event_data.get("date") or event_data.get("event_date") or event_data.get("date_iso") or event_data.get("datetime"))
-    event_time = _clean_field_value(event_data.get("time") or event_data.get("event_time"))
-    raw_text = _clean_field_value(event_data.get("raw_text") or event_data.get("description") or event_data.get("title"))
+    event_date = _normalize_iso8601(
+        event_data.get("date") or event_data.get("due_date")
+        or event_data.get("event_date") or event_data.get("date_iso") or event_data.get("datetime")
+    )
+    event_time = _clean_field_value(event_data.get("time") or event_data.get("due_time") or event_data.get("event_time"))
+    raw_text = _clean_field_value(
+        event_data.get("raw_text") or event_data.get("note")
+        or event_data.get("description") or event_data.get("title")
+    )
 
     normalized = {
         "type": event_type,
@@ -275,7 +361,7 @@ def normalize_extraction_output(data: dict, source_type: str | None = None) -> d
     contact_src = data.get("contact") if isinstance(data.get("contact"), dict) else {}
     entities = data.get("entities") if isinstance(data.get("entities"), dict) else data
     schema["contact"] = {
-        "full_name": _clean_field_value(contact_src.get("full_name") or entities.get("full_name") or entities.get("name")),
+        "full_name": _clean_field_value(contact_src.get("full_name") or contact_src.get("name") or entities.get("full_name") or entities.get("name")),
         "phone": _clean_field_value(contact_src.get("phone") or entities.get("phone")),
         "email": _clean_field_value(contact_src.get("email") or entities.get("email")),
         "company": _clean_field_value(contact_src.get("company") or entities.get("company")),
@@ -629,34 +715,46 @@ def _python_extract_from_image(image_base64: str) -> dict | None:
         return None
 
 
-def _call_business_card_llm(input_text: str = None, image_base64: str = None, source_type: str | None = None) -> dict | None:
+def _call_business_card_llm(
+    input_text: str = None,
+    image_base64: str = None,
+    source_type: str | None = None,
+    user_phone: str = "",
+    sf_id: str = "",
+) -> dict | None:
     """LLM extraction fallback. Returns parsed JSON dict or None."""
     if not input_text and not image_base64:
         return None
 
     try:
-        system_prompt = _TEXT_BUSINESS_CARD_SYSTEM_PROMPT
-        raw_response = None
+        from datetime import date as _date
+        current_date = _date.today().isoformat()
+        input_type_map = {
+            "ocr": "image_text",
+            "image": "image_text",
+            "transcript": "audio_text",
+            "audio": "audio_text",
+        }
+        input_type = input_type_map.get(source_type or "", "text")
 
-        input_type = _detect_input_type(source_type)
+        prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
+            current_date=current_date,
+            input_type=input_type,
+            input_text=input_text or "[image attached]",
+            user=user_phone or "",
+            sf_id=sf_id or "",
+        )
+        system_instruction = "You are a structured data extraction assistant. Return only valid JSON."
+        raw_response = None
 
         if image_base64:
             client = OpenAI(api_key=OPENAI_API_KEY)
             messages = [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_instruction},
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"INPUT_TYPE: {input_type}\n\n"
-                                "INPUT_DATA:\n[image attached]\n\n"
-                                "CONTEXT:\n- User interaction comes from WhatsApp or mobile app\n"
-                                "- Output will be sent to Salesforce\n"
-                                "- System should support follow-ups and event tracking"
-                            ),
-                        },
+                        {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                     ],
                 },
@@ -666,17 +764,8 @@ def _call_business_card_llm(input_text: str = None, image_base64: str = None, so
                 raw_response = completion.choices[0].message.content
         else:
             messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"INPUT_TYPE: {input_type}\n\n"
-                        f"INPUT_DATA:\n{input_text}\n\n"
-                        "CONTEXT:\n- User interaction comes from WhatsApp or mobile app\n"
-                        "- Output will be sent to Salesforce\n"
-                        "- System should support follow-ups and event tracking"
-                    ),
-                },
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt},
             ]
             raw_response = _call_text_llm(messages)
 
