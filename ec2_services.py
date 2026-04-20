@@ -1025,7 +1025,7 @@ def _resolve_ffmpeg_binary() -> str | None:
 
 
 
-def get_llm_response(text_input: str, image_input : str = None) -> Optional[str]:
+def get_llm_response(text_input: str, image_input: str = None, conversation_history: str = None) -> Optional[str]:
     """
     Get the response from the LLM given a text input and an optional image input.
 
@@ -1062,16 +1062,22 @@ def get_llm_response(text_input: str, image_input : str = None) -> Optional[str]
                 messages=messages
             )
         else:
-            # Use Groq for text-only responses
+            # Use Groq for text-only responses; prepend conversation history when available
             client = Groq(api_key=GROQ_API_KEY)
+            chat_messages = []
+            if conversation_history:
+                chat_messages.append({
+                    "role": "system",
+                    "content": (
+                        "You are a helpful WhatsApp assistant. "
+                        "Below is the recent conversation history for context:\n\n"
+                        + conversation_history
+                    ),
+                })
+            chat_messages.append({"role": "user", "content": text_input})
             completion = client.chat.completions.create(
                 model=GROQ_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": text_input
-                    }
-                ]
+                messages=chat_messages,
             )
         
         if completion.choices and len(completion.choices) > 0:

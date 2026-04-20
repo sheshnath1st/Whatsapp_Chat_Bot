@@ -52,6 +52,7 @@ class LLMRequest(BaseModel):
     user_input: str
     media_id: Optional[str] = None
     kind: Optional[KindEnum] = None
+    conversation_history: Optional[str] = None
 
 
 class LLMResponse(BaseModel):
@@ -168,7 +169,7 @@ async def api_llm_response(req: LLMRequest):
 
             logger.info("Processing text message")
 
-            result = get_llm_response(text_message)
+            result = get_llm_response(text_message, conversation_history=req.conversation_history)
 
             logger.info(f"LLM response: {result}")
 

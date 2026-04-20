@@ -5,6 +5,7 @@ import tempfile
 import json
 import requests
 import httpx
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Optional
 from conversation_store import (
@@ -15,6 +16,9 @@ from conversation_store import (
     clear_pending_sf_context,
     save_contact,
     update_contact_event,
+    upsert_conversation_message,
+    update_conversation_sf_and_context,
+    get_recent_messages,
 )
 
 load_dotenv()
@@ -31,6 +35,107 @@ AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:5000")
 SALESFORCE_API_URL = os.getenv("SALESFORCE_API_URL")
 SALESFORCE_COOKIE = os.getenv("SALESFORCE_COOKIE")
 JSON_CONTENT_TYPE = "application/json"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _format_history_for_llm(messages: list) -> str:
+    """Convert recent conversation messages into a compact text block for LLM context."""
+    if not messages:
+        return ""
+    parts = []
+    for msg in messages:
+        ts = msg.get("timestamp", "")
+        msg_type = msg.get("type", "unknown")
+        if msg_type == "image":
+            extracted = msg.get("extracted") or {}
+            name = extracted.get("name") or "unknown"
+            company = extracted.get("company") or ""
+            sf = (msg.get("salesforce") or {}).get("response") or {}
+            sf_id = sf.get("sf_id") or ""
+            line = f"[{ts}] IMAGE: Business card scanned — Name: {name}, Company: {company}"
+            if sf_id:
+                line += f", SF ID: {sf_id}"
+            parts.append(line)
+        elif msg_type == "audio":
+            proc = msg.get("processing") or {}
+            transcript = proc.get("transcript") or ""
+            event = msg.get("event") or {}
+            event_type = event.get("event_type") or event.get("type") or ""
+            line = f"[{ts}] AUDIO: \"{transcript}\""
+            if event_type and event_type.lower() != "none":
+                due = event.get("due_date") or event.get("date") or ""
+                line += f" → Event: {event_type}" + (f" on {due}" if due else "")
+            parts.append(line)
+        elif msg_type == "text":
+            direction = msg.get("direction") or "user"
+            content = msg.get("content") or ""
+            parts.append(f"[{ts}] {direction.upper()}: {content}")
+    return "\n".join(parts)
+
+
+def _build_image_message_doc(
+    *,
+    message_id: Optional[str],
+    media_id: Optional[str],
+    extracted_data: dict,
+    salesforce_payload: Optional[dict],
+    salesforce_result: Optional[dict],
+) -> dict:
+    contact = (extracted_data.get("contact") if isinstance(extracted_data.get("contact"), dict) else {}) or {}
+    meta = (extracted_data.get("metadata") if isinstance(extracted_data.get("metadata"), dict) else {}) or {}
+    sf_id = (salesforce_result or {}).get("salesforce_id")
+    sf_status = "created" if (salesforce_result or {}).get("ok") else "failed"
+    return {
+        "message_id": message_id,
+        "type": "image",
+        "timestamp": _utc_now_iso(),
+        "media": {"id": media_id, "url": None, "stored_url": None, "mime_type": "image/jpeg"},
+        "processing": {
+            "ocr_text": None,
+            "confidence": meta.get("confidence_score"),
+        },
+        "extracted": {
+            "name": contact.get("full_name") or contact.get("name"),
+            "phone": contact.get("phone"),
+            "email": contact.get("email"),
+            "company": contact.get("company"),
+            "designation": contact.get("designation"),
+        },
+        "llm": {"prompt_version": "v1", "raw_output": {}},
+        "salesforce": {
+            "payload": salesforce_payload,
+            "response": {"sf_id": sf_id, "status": sf_status},
+        },
+    }
+
+
+def _build_audio_message_doc(
+    *,
+    message_id: Optional[str],
+    media_id: Optional[str],
+    transcript: str,
+    event: Optional[dict],
+    salesforce_payload: Optional[dict],
+    salesforce_result: Optional[dict],
+    reply_to: Optional[str] = None,
+) -> dict:
+    sf_status = "updated" if (salesforce_result or {}).get("ok") else "failed"
+    return {
+        "message_id": message_id,
+        "type": "audio",
+        "timestamp": _utc_now_iso(),
+        "reply_to": reply_to,
+        "media": {"id": media_id, "stored_url": None, "mime_type": "audio/ogg"},
+        "processing": {"transcript": transcript, "language": "en", "confidence": None},
+        "event": event,
+        "salesforce": {
+            "payload": salesforce_payload,
+            "response": {"status": sf_status},
+        },
+    }
 
 
 def _extract_whatsapp_message_id(response_json: dict) -> Optional[str]:
@@ -431,6 +536,25 @@ async def _handle_audio_event_flow(
         event=event if isinstance(event, dict) and any(event.values()) else None,
     )
 
+    # Save audio message to conversation thread
+    audio_doc = _build_audio_message_doc(
+        message_id=incoming_message_id,
+        media_id=media_id,
+        transcript=transcript,
+        event=event if isinstance(event, dict) and any(event.values()) else None,
+        salesforce_payload=sf_update_payload,
+        salesforce_result=sf_result,
+        reply_to=None,
+    )
+    upsert_conversation_message(user_phone, audio_doc)
+    event_type = (event or {}).get("event_type") or (event or {}).get("type")
+    event_date = (event or {}).get("due_date") or (event or {}).get("date")
+    update_conversation_sf_and_context(
+        user_phone,
+        last_intent=event_type if event_type and event_type.lower() != "none" else None,
+        last_event_date=event_date,
+    )
+
     event_summary = ""
     if isinstance(event, dict):
         event_type = event.get("event_type") or event.get("type")
@@ -496,6 +620,13 @@ async def llm_reply_to_text_v2(
             "media_id": media_id,
             "kind": kind,
         }
+
+        # For plain text chat, inject conversation history so the LLM understands prior context
+        if not kind or kind == "text":
+            recent = get_recent_messages(user_phone, limit=10)
+            if recent:
+                json_data["conversation_history"] = _format_history_for_llm(recent)
+
         print(" LLM API request:", json_data)
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -552,7 +683,7 @@ async def llm_reply_to_text_v2(
 
                 sf_status = _salesforce_status_message(salesforce_result)
 
-                # Save extracted contact + SF ID to MongoDB
+                # Save extracted contact + SF ID to legacy contacts collection
                 if isinstance(message_content, dict):
                     _contact_data = dict(message_content)
                     if sf_id:
@@ -564,6 +695,40 @@ async def llm_reply_to_text_v2(
                         source=kind,
                         message_id=incoming_message_id,
                     ))
+
+                # Save to new conversation thread
+                if kind == "image" and isinstance(message_content, dict):
+                    img_doc = _build_image_message_doc(
+                        message_id=incoming_message_id,
+                        media_id=media_id,
+                        extracted_data=message_content,
+                        salesforce_payload=salesforce_payload,
+                        salesforce_result=salesforce_result,
+                    )
+                    loop.run_in_executor(None, lambda: upsert_conversation_message(user_phone, img_doc))
+                    if sf_id:
+                        loop.run_in_executor(None, lambda: update_conversation_sf_and_context(user_phone, sf_id=sf_id))
+
+                elif kind == "audio" and isinstance(message_content, dict):
+                    transcript = message_content.get("transcript") or ""
+                    event = message_content.get("event") if isinstance(message_content.get("event"), dict) else None
+                    audio_doc = _build_audio_message_doc(
+                        message_id=incoming_message_id,
+                        media_id=media_id,
+                        transcript=transcript,
+                        event=event,
+                        salesforce_payload=salesforce_payload,
+                        salesforce_result=salesforce_result,
+                    )
+                    loop.run_in_executor(None, lambda: upsert_conversation_message(user_phone, audio_doc))
+                    if event:
+                        _ev_type = event.get("event_type") or event.get("type")
+                        _ev_date = event.get("due_date") or event.get("date")
+                        loop.run_in_executor(None, lambda: update_conversation_sf_and_context(
+                            user_phone,
+                            last_intent=_ev_type if _ev_type and _ev_type.lower() != "none" else None,
+                            last_event_date=_ev_date,
+                        ))
 
                 # Flow 1: after image card sync, store SF ID so the user can follow up with voice
                 if kind == "image" and salesforce_result and salesforce_result.get("ok") and sf_id:
@@ -620,6 +785,26 @@ async def llm_reply_to_text_v2(
                             "salesforce_result": salesforce_result,
                         },
                     )
+
+                # Save user + assistant text messages to conversation thread
+                if not kind or kind == "text":
+                    now_ts = _utc_now_iso()
+                    user_msg_doc = {
+                        "message_id": incoming_message_id,
+                        "type": "text",
+                        "direction": "user",
+                        "timestamp": now_ts,
+                        "content": user_input,
+                    }
+                    assistant_msg_doc = {
+                        "message_id": (send_result or {}).get("message_id"),
+                        "type": "text",
+                        "direction": "assistant",
+                        "timestamp": _utc_now_iso(),
+                        "content": message_content_str,
+                    }
+                    loop.run_in_executor(None, lambda: upsert_conversation_message(user_phone, user_msg_doc))
+                    loop.run_in_executor(None, lambda: upsert_conversation_message(user_phone, assistant_msg_doc))
             else:
                 print("Error: Empty message content from LLM API")
                 log_failure(

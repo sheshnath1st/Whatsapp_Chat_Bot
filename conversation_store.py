@@ -16,6 +16,7 @@ MONGODB_FAILURE_COLLECTION = os.getenv("MONGODB_FAILURE_COLLECTION", "conversati
 _SF_CONTEXT_COLLECTION = os.getenv("MONGODB_SF_CONTEXT_COLLECTION", "pending_sf_contexts")
 _SF_CONTEXT_TTL_SECONDS = int(os.getenv("SF_CONTEXT_TTL_SECONDS", "86400"))
 _CONTACTS_COLLECTION = os.getenv("MONGODB_CONTACTS_COLLECTION", "contacts")
+_CONVERSATIONS_COLLECTION = os.getenv("MONGODB_CONVERSATIONS_COLLECTION", "conversations")
 
 _LOCK = threading.Lock()
 _CLIENT: Optional[MongoClient] = None
@@ -49,6 +50,10 @@ def _get_sf_context_collection():
 
 def _get_contacts_collection():
     return _get_client()[MONGODB_DB][_CONTACTS_COLLECTION]
+
+
+def _get_conversations_collection():
+    return _get_client()[MONGODB_DB][_CONVERSATIONS_COLLECTION]
 
 
 # ── Event logging ─────────────────────────────────────────────────────────────
@@ -232,3 +237,79 @@ def update_contact_event(
             print(f"[MongoDB] contact event updated for phone={phone} sf_id={sf_id}")
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB update_contact_event failed: {exc}")
+
+
+# ── Thread-per-user conversation store ───────────────────────────────────────
+
+def upsert_conversation_message(phone: str, message_doc: dict) -> None:
+    """
+    Append a typed message document to the user's conversation thread.
+    Creates the conversation document if it does not yet exist.
+
+    message_doc must include at minimum: message_id, type, timestamp.
+    """
+    now = _utc_now_iso()
+    with _LOCK:
+        try:
+            _get_conversations_collection().update_one(
+                {"_id": f"conv_{phone}"},
+                {
+                    "$push": {"messages": message_doc},
+                    "$set": {"updated_at": now},
+                    "$setOnInsert": {
+                        "user": phone,
+                        "sf_id": None,
+                        "created_at": now,
+                        "context": {"last_intent": None, "last_event_date": None},
+                    },
+                },
+                upsert=True,
+            )
+            print(f"[MongoDB] conversation message saved for phone={phone} type={message_doc.get('type')}")
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB upsert_conversation_message failed: {exc}")
+
+
+def update_conversation_sf_and_context(
+    phone: str,
+    *,
+    sf_id: Optional[str] = None,
+    last_intent: Optional[str] = None,
+    last_event_date: Optional[str] = None,
+) -> None:
+    """Update the top-level sf_id and/or context fields on the conversation."""
+    now = _utc_now_iso()
+    fields: dict[str, Any] = {"updated_at": now}
+    if sf_id is not None:
+        fields["sf_id"] = sf_id
+    if last_intent is not None:
+        fields["context.last_intent"] = last_intent
+    if last_event_date is not None:
+        fields["context.last_event_date"] = last_event_date
+    with _LOCK:
+        try:
+            _get_conversations_collection().update_one(
+                {"_id": f"conv_{phone}"},
+                {"$set": fields},
+            )
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB update_conversation_sf_and_context failed: {exc}")
+
+
+def get_conversation(phone: str) -> Optional[dict]:
+    """Return the full conversation document for a phone number, or None."""
+    with _LOCK:
+        try:
+            return _get_conversations_collection().find_one({"_id": f"conv_{phone}"})
+        except (RuntimeError, PyMongoError) as exc:
+            print(f"MongoDB get_conversation failed: {exc}")
+            return None
+
+
+def get_recent_messages(phone: str, limit: int = 10) -> list:
+    """Return the last N messages from the conversation thread."""
+    conv = get_conversation(phone)
+    if not conv:
+        return []
+    messages = conv.get("messages") or []
+    return messages[-limit:] if len(messages) > limit else messages
