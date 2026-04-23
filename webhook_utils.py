@@ -426,7 +426,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
                 meeting_datetime = f"{date_val}T{time_val}"
         # Add meetingDateTime, transcript, and leadId to payload for Salesforce update
         if meeting_datetime:
-            payload["meetingDateTime"] = meeting_datetime
+            payload["meetingDateTime"] = resolve_datetime(meeting_datetime)
         if "transcript" in payload:
             payload["transcript"] = payload["transcript"]
         payload["leadId"] = sf_id
