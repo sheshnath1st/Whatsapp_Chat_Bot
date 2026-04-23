@@ -321,28 +321,26 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         meeting_datetime = None
         if isinstance(event, dict):
             date_val = event.get("date")
+            time_val = event.get("time") or event.get("due_time")
             raw_text = event.get("raw_text") or ""
             # If date is missing or null, try to resolve relative date
             if (date_val is None or str(date_val).lower() == "null" or not str(date_val).strip()) and raw_text:
-                # Look for patterns like 'in X days', 'for X days from today', 'after X days', etc.
                 match = re.search(r"(\d+)\s+days?\s*(from\s+today|later|after)?", raw_text, re.IGNORECASE)
                 if match:
                     days = int(match.group(1))
                     resolved_date = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
                     event["date"] = resolved_date
-                    meeting_datetime = resolved_date
+                    date_val = resolved_date
                 else:
-                    # Try 'tomorrow', 'next week', 'Monday', etc.
                     if re.search(r"tomorrow", raw_text, re.IGNORECASE):
                         resolved_date = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
                         event["date"] = resolved_date
-                        meeting_datetime = resolved_date
+                        date_val = resolved_date
                     elif re.search(r"next week", raw_text, re.IGNORECASE):
                         resolved_date = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
                         event["date"] = resolved_date
-                        meeting_datetime = resolved_date
+                        date_val = resolved_date
                     else:
-                        # Check for weekdays like Monday, Tuesday, etc.
                         weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
                         for i, wd in enumerate(weekdays):
                             if re.search(wd, raw_text, re.IGNORECASE):
@@ -352,12 +350,14 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
                                     days_ahead = 7
                                 resolved_date = (today + timedelta(days=days_ahead)).date().isoformat()
                                 event["date"] = resolved_date
-                                meeting_datetime = resolved_date
+                                date_val = resolved_date
                                 break
-            else:
-                # If date is already present, use it
-                if date_val:
-                    meeting_datetime = date_val
+            # If time is missing, default to 10:00:00
+            if not time_val or not str(time_val).strip():
+                time_val = "10:00:00"
+            # If both date and time are present, build ISO datetime
+            if date_val:
+                meeting_datetime = f"{date_val}T{time_val}"
         # Add meetingDateTime, transcript, and leadId to payload for Salesforce update
         if meeting_datetime:
             payload["meetingDateTime"] = meeting_datetime
