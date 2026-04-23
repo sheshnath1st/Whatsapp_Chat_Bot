@@ -495,7 +495,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
                 meeting_datetime = f"{date_val}T{time_val}"
         # Add meetingDateTime, transcript, and leadId to payload for Salesforce update
         if meeting_datetime:
-            payload["meetingDateTime"] = resolve_datetime(meeting_datetime)
+            payload["meetingDateTime"] = get_next_weekday(resolve_datetime(meeting_datetime))
         if "transcript" in payload:
             payload["transcript"] = payload["transcript"]
         payload["leadId"] = sf_id
@@ -816,6 +816,25 @@ async def _handle_audio_event_flow(
         payload={"sf_id": sf_id, "sf_update_payload": sf_update_payload, "sf_result": sf_result},
     )
 
+def get_next_weekday(target_day_name: str):
+    WEEKDAYS = {
+        "monday": 0, "tuesday": 1, "wednesday": 2,
+        "thursday": 3, "friday": 4,
+        "saturday": 5, "sunday": 6
+    }
+
+    today = datetime.now()
+    today_day = today.weekday()
+
+    target_day = WEEKDAYS[target_day_name.strip().lower()]
+
+    days_ahead = (target_day - today_day + 7) % 7
+    if days_ahead == 0:
+        days_ahead = 7  # next Monday, not today
+
+    next_date = today + timedelta(days=days_ahead)
+
+    return next_date.strftime("%Y-%m-%d-T%H:%M:%S")
 
 async def llm_reply_to_text_v2(
     user_input: str,
