@@ -739,7 +739,7 @@ async def _handle_audio_event_flow(
         dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
         meeting_datetime = resolve_datetime(dt_input)
         if meeting_datetime:
-            sf_update_payload["meetingDateTime"] = meeting_datetime
+            sf_update_payload["meetingDateTime"] = get_next_weekday(meeting_datetime)
 
     loop = asyncio.get_running_loop()
     sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
@@ -775,7 +775,7 @@ async def _handle_audio_event_flow(
 
 
     event_summary = ""
-    meeting_datetime = sf_update_payload.get("meetingDateTime")
+    meeting_datetime = get_next_weekday(sf_update_payload.get("meetingDateTime"))
     if isinstance(event, dict):
         event_type = event.get("event_type") or event.get("type")
         event_date = event.get("due_date") or event.get("date")
@@ -822,7 +822,7 @@ def get_next_weekday(target_day_name: str):
         "thursday": 3, "friday": 4,
         "saturday": 5, "sunday": 6
     }
-
+    print(f"Resolving next weekday for: {target_day_name}")
     today = datetime.now()
     today_day = today.weekday()
 
