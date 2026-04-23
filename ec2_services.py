@@ -744,7 +744,15 @@ def _call_business_card_llm(
             user=user_phone or "",
             sf_id=sf_id or "",
         )
-        system_instruction = "You are a structured data extraction assistant. Return only valid JSON."
+        system_instruction = (
+            "You are a structured data extraction assistant. "
+            "Extract and return only valid JSON with these fields: "
+            "contact (name, phone, email, company, designation, website, address), "
+            "transcript (full message), "
+            "event (type, date, time, raw_text), "
+            "and meeting date if mentioned (resolve relative dates like 'in two days', 'Monday' to absolute date using today's date). "
+            "No explanation, no markdown, JSON only."
+        )
         raw_response = None
 
         if image_base64:
