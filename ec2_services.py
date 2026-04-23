@@ -1312,8 +1312,11 @@ async def handle_image_message(media_id: str) -> str:
     Returns:
         str: The base64 string of the image.
     """
+    if not media_id:
+        raise ValueError("media_id is required for image fetch")
     media_url = await fetch_media(media_id)
-    # print(media_url)
+    if not media_url:
+        raise ValueError(f"Could not fetch media URL for media_id={media_id}")
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
         response = await client.get(media_url, headers=headers)
@@ -1340,7 +1343,11 @@ async def handle_audio_message(media_id: str):
     Returns:
         str: The transcribed text.
     """
+    if not media_id:
+        raise ValueError("media_id is required for audio fetch")
     media_url = await fetch_media(media_id)
+    if not media_url:
+        raise ValueError(f"Could not fetch media URL for media_id={media_id}")
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
         response = await client.get(media_url, headers=headers)
