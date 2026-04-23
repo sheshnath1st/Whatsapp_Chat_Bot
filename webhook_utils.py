@@ -438,20 +438,25 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         event = payload.get("event")
         print(f"Original event data for Salesforce update: {event}")
         meeting_datetime = None
+
+        def resolve_weekday_to_date(weekday_str):
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            if weekday_str and isinstance(weekday_str, str) and weekday_str.lower() in weekdays:
+                today = datetime.now(timezone.utc)
+                i = weekdays.index(weekday_str.lower())
+                days_ahead = (i - today.weekday() + 7) % 7
+                days_ahead = days_ahead or 7
+                return (today + timedelta(days=days_ahead)).date().isoformat()
+            return None
+
         if isinstance(event, dict):
             date_val = event.get("date")
             time_val = event.get("time") or event.get("due_time")
             raw_text = event.get("raw_text") or ""
 
-            # --- Weekday string resolution (always check date_val) ---
-            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            if date_val and isinstance(date_val, str) and date_val.lower() in weekdays:
-                today = datetime.now(timezone.utc)
-                i = weekdays.index(date_val.lower())
-                days_ahead = (i - today.weekday() + 7) % 7
-                if days_ahead == 0:
-                    days_ahead = 7
-                resolved_date = (today + timedelta(days=days_ahead)).date().isoformat()
+            # Always resolve weekday in date_val
+            resolved_date = resolve_weekday_to_date(date_val)
+            if resolved_date:
                 event["date"] = resolved_date
                 date_val = resolved_date
 
@@ -473,16 +478,15 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
                         event["date"] = resolved_date
                         date_val = resolved_date
                     else:
-                        for i, wd in enumerate(weekdays):
+                        # Also resolve weekday in raw_text
+                        for wd in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
                             if re.search(wd, raw_text, re.IGNORECASE):
-                                today = datetime.now(timezone.utc)
-                                days_ahead = (i - today.weekday() + 7) % 7
-                                if days_ahead == 0:
-                                    days_ahead = 7
-                                resolved_date = (today + timedelta(days=days_ahead)).date().isoformat()
-                                event["date"] = resolved_date
-                                date_val = resolved_date
-                                break
+                                resolved_date = resolve_weekday_to_date(wd)
+                                if resolved_date:
+                                    event["date"] = resolved_date
+                                    date_val = resolved_date
+                                    break
+
             # If time is missing, default to 10:00:00
             if not time_val or not str(time_val).strip():
                 time_val = "10:00:00"
@@ -501,8 +505,6 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         headers = {"Content-Type": JSON_CONTENT_TYPE}
         if SALESFORCE_COOKIE:
             headers["Cookie"] = SALESFORCE_COOKIE
-
-        print(f"Updating Salesforce record {sf_id}: {payload}")
         response = requests.post(url, headers=headers, json=payload, timeout=15)
 
         response_body = None
