@@ -823,6 +823,9 @@ def get_next_weekday(target_day_name: str):
         "saturday": 5, "sunday": 6
     }
     print(f"Resolving next weekday for: {target_day_name}")
+    # 🔴 FIX: if already datetime → return as-is
+    if re.match(r"\d{4}-\d{2}-\d{2}", target_day_name):
+        return target_day_name
     today = datetime.now()
     today_day = today.weekday()
 
