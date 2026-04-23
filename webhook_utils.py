@@ -685,7 +685,9 @@ async def _handle_audio_event_flow(
         last_event_date=event_date,
     )
 
+
     event_summary = ""
+    meeting_datetime = sf_update_payload.get("meetingDateTime")
     if isinstance(event, dict):
         event_type = event.get("event_type") or event.get("type")
         event_date = event.get("due_date") or event.get("date")
@@ -697,6 +699,8 @@ async def _handle_audio_event_flow(
             if event_time:
                 parts.append(event_time)
             event_summary = f"\nEvent: {' | '.join(parts)}"
+            if meeting_datetime:
+                event_summary += f"\nSchedule Date: {meeting_datetime}"
 
     sf_status = "Salesforce record updated." if (sf_result or {}).get("ok") else "Salesforce update failed."
     reply = f"Voice note received.\nTranscript: {transcript}{event_summary}\n\n{sf_status} (ID: {sf_id})"
