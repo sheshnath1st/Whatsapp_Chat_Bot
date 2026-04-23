@@ -899,7 +899,7 @@ def _call_business_card_llm(
             "### Audio → Update Lead\n"
             "\n"
             "Input:\n"
-            "Create a meeting on Tuesday"\n"
+            "Create a meeting on Tuesday\n"
             "resolved_leadId = \"SF123\"\n"
             "\n"
             "→ update_lead with event\n"
