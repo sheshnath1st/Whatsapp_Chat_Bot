@@ -912,7 +912,7 @@ async def llm_reply_to_text_v2(
             if recent:
                 json_data["conversation_history"] = _format_history_for_llm(recent)
 
-        print(" LLM API request:", json_data)
+        print(" LLM API request user_input:", user_input)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{AGENT_URL}/llm-response",
