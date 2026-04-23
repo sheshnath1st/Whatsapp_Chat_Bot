@@ -442,7 +442,20 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             date_val = event.get("date")
             time_val = event.get("time") or event.get("due_time")
             raw_text = event.get("raw_text") or ""
-            # If date is missing or null, try to resolve relative date
+
+            # --- Weekday string resolution (always check date_val) ---
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            if date_val and isinstance(date_val, str) and date_val.lower() in weekdays:
+                today = datetime.now(timezone.utc)
+                i = weekdays.index(date_val.lower())
+                days_ahead = (i - today.weekday() + 7) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                resolved_date = (today + timedelta(days=days_ahead)).date().isoformat()
+                event["date"] = resolved_date
+                date_val = resolved_date
+
+            # If date is missing or null, try to resolve relative date from raw_text
             if (date_val is None or str(date_val).lower() == "null" or not str(date_val).strip()) and raw_text:
                 match = re.search(r"(\d+)\s+days?\s*(from\s+today|later|after)?", raw_text, re.IGNORECASE)
                 if match:
@@ -460,7 +473,6 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
                         event["date"] = resolved_date
                         date_val = resolved_date
                     else:
-                        weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
                         for i, wd in enumerate(weekdays):
                             if re.search(wd, raw_text, re.IGNORECASE):
                                 today = datetime.now(timezone.utc)
