@@ -182,11 +182,18 @@ RULES:
 
 ### EVENT EXTRACTION
 Detect intent: call, meeting, email, follow_up, reminder
-Convert relative dates using CURRENT DATE above:
-- "tomorrow" → CURRENT_DATE + 1 day
-- "after 2 days" → CURRENT_DATE + 2 days
-- "next week" → CURRENT_DATE + 7 days
-- "three days from today" → CURRENT_DATE + 3 days
+### EVENT DATE RULE (STRICT)
+
+- Extract ONLY raw date text
+- DO NOT calculate or convert to actual date
+- DO NOT generate ISO datetime
+
+Examples:
+- "tomorrow" → "due_date": "tomorrow"
+- "after 2 days" → "due_date": "after 2 days"
+- "Wednesday" → "due_date": "Wednesday"
+- "next week" → "due_date": "next week"
+- "three days from today" → "due_date": "three days from today"
 If no event found → event_type = "none", due_date = null
 
 ### SALESFORCE PAYLOAD
@@ -322,9 +329,8 @@ def _normalize_event(event_data) -> dict | None:
     if raw_type and str(raw_type).lower() == "none":
         raw_type = None
     event_type = _EVENT_TYPE_ALIASES.get(str(raw_type).lower(), None) if raw_type else None
-    event_date = _normalize_iso8601(
-        event_data.get("date") or event_data.get("due_date")
-        or event_data.get("event_date") or event_data.get("date_iso") or event_data.get("datetime")
+    event_date = _clean_field_value(
+    event_data.get("date") or event_data.get("due_date")
     )
     event_time = _clean_field_value(event_data.get("time") or event_data.get("due_time") or event_data.get("event_time"))
     raw_text = _clean_field_value(

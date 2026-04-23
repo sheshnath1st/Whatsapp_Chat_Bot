@@ -637,9 +637,20 @@ async def _handle_audio_event_flow(
     transcript = result.get("transcript", "")
     event = result.get("event") or {}
 
+
+    # --- Backend: resolve ISO datetime from LLM event extraction ---
     sf_update_payload = {"transcript": transcript}
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
+        # Compose raw date/time string for resolution
+        raw_date = event.get("date") or event.get("due_date")
+        raw_time = event.get("time") or event.get("due_time")
+        raw_text = event.get("rawText") or event.get("raw_text") or raw_date
+        # Combine date and time if both present, else use raw_text
+        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
+        meeting_datetime = resolve_datetime(dt_input)
+        if meeting_datetime:
+            sf_update_payload["meetingDateTime"] = meeting_datetime
 
     loop = asyncio.get_running_loop()
     sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
