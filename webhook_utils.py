@@ -384,6 +384,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         from datetime import timedelta
         import re
         event = payload.get("event")
+        print(f"Original event data for Salesforce update: {event}")
         meeting_datetime = None
         if isinstance(event, dict):
             date_val = event.get("date")
