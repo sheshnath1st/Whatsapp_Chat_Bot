@@ -372,7 +372,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             headers["Cookie"] = SALESFORCE_COOKIE
 
         print(f"Updating Salesforce record {sf_id}: {payload}")
-        response = requests.patch(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
 
         response_body = None
         try:
