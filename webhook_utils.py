@@ -1,69 +1,116 @@
 import re
 from datetime import datetime, timedelta
 
-# ---
-# Date/time resolution for WhatsApp → LLM → Salesforce
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+MONTHS = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12
+}
+
+def normalize_numbers(text: str) -> str:
+    word_map = {
+        "one":"1","two":"2","three":"3","four":"4","five":"5",
+        "six":"6","seven":"7","eight":"8","nine":"9","ten":"10"
+    }
+    for word, num in word_map.items():
+        text = re.sub(rf"\b{word}\b", num, text, flags=re.IGNORECASE)
+    return text
+
 
 def resolve_datetime(text: str) -> str:
-    """
-    Parse natural language date/time from text and return ISO 8601 datetime string (YYYY-MM-DDTHH:MM:SS).
-    Returns None if no valid date found.
-    """
-    if not text or not isinstance(text, str):
+    if not text:
         return None
-    text = text.lower().strip()
+
+    text = normalize_numbers(text.lower())
     now = datetime.now()
     base_date = None
 
-    # --- 1. Relative days ---
-    if re.search(r"\btoday\b", text):
-        base_date = now
-    elif re.search(r"\btomorrow\b", text):
+    # --- RELATIVE ---
+    if "day after tomorrow" in text:
+        base_date = now + timedelta(days=2)
+    elif "tomorrow" in text:
         base_date = now + timedelta(days=1)
+    elif "today" in text:
+        base_date = now
     elif m := re.search(r"after (\d+) days", text):
         base_date = now + timedelta(days=int(m.group(1)))
     elif m := re.search(r"in (\d+) days", text):
         base_date = now + timedelta(days=int(m.group(1)))
+    elif "next week" in text:
+        base_date = now + timedelta(days=7)
 
-    # --- 2. Weekday handling ---
+    # --- DATE (26th) ---
+    elif m := re.search(r"\b(\d{1,2})(st|nd|rd|th)\b", text):
+        day = int(m.group(1))
+        try:
+            base_date = now.replace(day=day)
+            if base_date < now:
+                month = now.month + 1 if now.month < 12 else 1
+                year = now.year if now.month < 12 else now.year + 1
+                base_date = base_date.replace(year=year, month=month)
+        except:
+            base_date = None
+
+    # --- DATE (26 April) ---
+    elif m := re.search(r"(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)", text):
+        day = int(m.group(1))
+        month = MONTHS[m.group(2)]
+        year = now.year
+        try:
+            base_date = datetime(year, month, day)
+            if base_date < now:
+                base_date = datetime(year + 1, month, day)
+        except:
+            base_date = None
+
+    # --- WEEKDAY ---
     else:
         for wd in WEEKDAYS:
-            # "next Monday" or just "Monday"
-            if f"next {wd}" in text:
+            if f"next {wd}" in text or re.search(rf"\b{wd}\b", text):
                 today_idx = now.weekday()
                 target_idx = WEEKDAYS.index(wd)
                 days_ahead = (target_idx - today_idx + 7) % 7
-                days_ahead = days_ahead or 7
-                base_date = now + timedelta(days=days_ahead)
-                break
-            elif re.search(rf"\b{wd}\b", text):
-                today_idx = now.weekday()
-                target_idx = WEEKDAYS.index(wd)
-                days_ahead = (target_idx - today_idx + 7) % 7
-                # If today is the day, move to next week
                 days_ahead = days_ahead or 7
                 base_date = now + timedelta(days=days_ahead)
                 break
 
-    # --- 3. Time parsing ---
-    time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
-    hour = 10
-    minute = 0
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2) or 0)
-        ampm = time_match.group(3)
-        if ampm:
-            if ampm == "pm" and hour != 12:
-                hour += 12
-            elif ampm == "am" and hour == 12:
-                hour = 0
-    # If no date found, return None
     if not base_date:
         return None
+
+    # --- TIME ---
+    hour, minute = 10, 0
+
+    # exact time
+    if m := re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text):
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        if m.group(3) == "pm" and hour != 12:
+            hour += 12
+        if m.group(3) == "am" and hour == 12:
+            hour = 0
+
+    # 24h format
+    elif m := re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+
+    # single number (e.g. "meeting at 5")
+    elif m := re.search(r"\bat (\d{1,2})\b", text):
+        hour = int(m.group(1))
+
+    # time words
+    elif "morning" in text:
+        hour = 10
+    elif "afternoon" in text:
+        hour = 14
+    elif "evening" in text:
+        hour = 18
+    elif "night" in text:
+        hour = 21
+
     dt = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
 import os
 import re
 import asyncio
