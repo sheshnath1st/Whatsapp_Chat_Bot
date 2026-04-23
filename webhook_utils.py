@@ -1,3 +1,69 @@
+import re
+from datetime import datetime, timedelta
+
+# ---
+# Date/time resolution for WhatsApp → LLM → Salesforce
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+def resolve_datetime(text: str) -> str:
+    """
+    Parse natural language date/time from text and return ISO 8601 datetime string (YYYY-MM-DDTHH:MM:SS).
+    Returns None if no valid date found.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    text = text.lower().strip()
+    now = datetime.now()
+    base_date = None
+
+    # --- 1. Relative days ---
+    if re.search(r"\btoday\b", text):
+        base_date = now
+    elif re.search(r"\btomorrow\b", text):
+        base_date = now + timedelta(days=1)
+    elif m := re.search(r"after (\d+) days", text):
+        base_date = now + timedelta(days=int(m.group(1)))
+    elif m := re.search(r"in (\d+) days", text):
+        base_date = now + timedelta(days=int(m.group(1)))
+
+    # --- 2. Weekday handling ---
+    else:
+        for wd in WEEKDAYS:
+            # "next Monday" or just "Monday"
+            if f"next {wd}" in text:
+                today_idx = now.weekday()
+                target_idx = WEEKDAYS.index(wd)
+                days_ahead = (target_idx - today_idx + 7) % 7
+                days_ahead = days_ahead or 7
+                base_date = now + timedelta(days=days_ahead)
+                break
+            elif re.search(rf"\b{wd}\b", text):
+                today_idx = now.weekday()
+                target_idx = WEEKDAYS.index(wd)
+                days_ahead = (target_idx - today_idx + 7) % 7
+                # If today is the day, move to next week
+                days_ahead = days_ahead or 7
+                base_date = now + timedelta(days=days_ahead)
+                break
+
+    # --- 3. Time parsing ---
+    time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+    hour = 10
+    minute = 0
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2) or 0)
+        ampm = time_match.group(3)
+        if ampm:
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+    # If no date found, return None
+    if not base_date:
+        return None
+    dt = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 import os
 import re
 import asyncio
