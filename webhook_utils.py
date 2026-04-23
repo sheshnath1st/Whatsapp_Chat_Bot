@@ -38,6 +38,11 @@ def resolve_datetime(text: str) -> str:
         base_date = now + timedelta(days=int(m.group(1)))
     elif "next week" in text:
         base_date = now + timedelta(days=7)
+    elif m := re.search(r"(\d+) day", text):
+        base_date = now + timedelta(days=int(m.group(1)))
+    elif m := re.search(r"(\d+) days", text):
+        base_date = now + timedelta(days=int(m.group(1)))
+
 
     # --- DATE (26th) ---
     elif m := re.search(r"\b(\d{1,2})(st|nd|rd|th)\b", text):
@@ -528,6 +533,28 @@ def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
     return f"Salesforce update failed: {error}"
 
 
+def normalize_numbers(text: str) -> str:
+    """
+    Replace number words (one, two, three...) with digits (1, 2, 3...)
+    Safe version using word boundaries.
+    """
+    if not text:
+        return text
+
+    replacements = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+        "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+        "fourteen": "14", "fifteen": "15", "sixteen": "16",
+        "seventeen": "17", "eighteen": "18", "nineteen": "19",
+        "twenty": "20"
+    }
+
+    for word, num in replacements.items():
+        text = re.sub(rf"\b{word}\b", num, text, flags=re.IGNORECASE)
+
+    return text
+
 def _to_salesforce_payload(extracted_data: dict) -> Optional[dict]:
     """Map normalized extraction output to Salesforce fields including transcript and event."""
     if not isinstance(extracted_data, dict):
@@ -687,7 +714,7 @@ async def _handle_audio_event_flow(
 
 
     # --- Backend: resolve ISO datetime from LLM event extraction ---
-    sf_update_payload = {"transcript": transcript}
+    sf_update_payload = {"transcript": normalize_numbers(transcript)}
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
         # Compose raw date/time string for resolution
@@ -709,7 +736,7 @@ async def _handle_audio_event_flow(
     update_contact_event(
         phone=user_phone,
         sf_id=sf_id,
-        transcript=transcript,
+        transcript=normalize_numbers(transcript),
         event=event if isinstance(event, dict) and any(event.values()) else None,
     )
 
@@ -717,7 +744,7 @@ async def _handle_audio_event_flow(
     audio_doc = _build_audio_message_doc(
         message_id=incoming_message_id,
         media_id=media_id,
-        transcript=transcript,
+        transcript=normalize_numbers(transcript),
         event=event if isinstance(event, dict) and any(event.values()) else None,
         salesforce_payload=sf_update_payload,
         salesforce_result=sf_result,
