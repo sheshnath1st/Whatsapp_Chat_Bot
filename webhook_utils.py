@@ -1050,15 +1050,18 @@ async def llm_reply_to_text_v2(
                     raw_date = event.get("date") or event.get("due_date")
                     raw_time = event.get("time") or event.get("due_time")
                     raw_text = event.get("rawText") or event.get("raw_text") or raw_date
-                    # Combine date and time if both present, else use raw_text
-                    dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
-                    meeting_datetime = resolve_datetime(dt_input)
-                    if meeting_datetime:
-                        salesforce_payload["meetingDateTime"] = meeting_datetime
-                    elif raw_date:
-                        # If only date is present, default to 10:00
-                        dt_input = f"{raw_date} 10:00"
+                    meeting_datetime = None
+                    # Try resolving with both date and time
+                    if raw_date:
+                        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
                         meeting_datetime = resolve_datetime(dt_input)
+                        # If failed, try with default time
+                        if not meeting_datetime:
+                            dt_input = f"{raw_date} 10:00"
+                            meeting_datetime = resolve_datetime(dt_input)
+                        # As a last fallback, try just the date string (for weekday names)
+                        if not meeting_datetime:
+                            meeting_datetime = resolve_datetime(raw_date)
                         if meeting_datetime:
                             salesforce_payload["meetingDateTime"] = meeting_datetime
                 message_content_str = _format_extraction_reply(message_content, kind)
