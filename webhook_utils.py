@@ -437,7 +437,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         import re
         event = payload.get("event")
         print(f"Original event data for Salesforce update: {event}")
-        meeting_datetime = event.get("meetingDateTime") or event.get("date") or event.get("due_date") or event.get("raw_text") or payload["transcript"] or ""
+        meeting_datetime = event.get("meetingDateTime") or event.get("date") or event.get("due_date") or event.get("raw_text") or ""
 
         def resolve_weekday_to_date(weekday_str):
             weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
