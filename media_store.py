@@ -58,10 +58,9 @@ def _detect_extension(kind: str, content_type: Optional[str]) -> str:
 
 
 def _build_s3_key(kind: str, ext: str, incoming_message_id: Optional[str]) -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y/%m/%d")
     message_part = incoming_message_id or "no_message_id"
     unique_id = uuid4().hex
-    return f"{S3_PREFIX}/{kind}/{timestamp}/{message_part}_{unique_id}.{ext}"
+    return f"{S3_PREFIX}/{kind}_{message_part}_{unique_id}.{ext}"
 
 
 def _fetch_media_download_url(media_id: str) -> Optional[str]:
@@ -157,7 +156,7 @@ def upload_whatsapp_media_to_s3(
         file_ext = _detect_extension(kind, content_type)
         s3_key = _build_s3_key(kind, file_ext, incoming_message_id)
         extra_args = {"ContentType": content_type} if content_type else {}
-
+        print(f"Uploading media_id={media_id} kind={kind} to S3 bucket={S3_BUCKET_NAME} key={s3_key}")
         client = _s3_client()
         client.upload_fileobj(
             io.BytesIO(media_bytes),
@@ -185,6 +184,7 @@ def upload_whatsapp_media_to_s3(
 
     except Exception as exc:
         logger.exception("Failed to upload media_id=%s kind=%s to S3", media_id, kind)
+        print(f"Failed to upload media_id={media_id} kind={kind} to S3: {exc}")
         log_failure(
             source="upload_whatsapp_media_to_s3.exception",
             error=str(exc),
