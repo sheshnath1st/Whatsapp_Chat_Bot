@@ -1161,6 +1161,7 @@ async def llm_reply_to_text_v2(
                     user_phone,
                     sf_id,
                     message_content if isinstance(message_content, dict) else {},
+                    message_id=incoming_message_id  
                 )
                 sf_status = f"{sf_status}\nReply with a voice note to add a follow-up event."
 

@@ -122,16 +122,17 @@ def get_conversation_history(phone: str, limit: int = 20):
 
 # ── Pending Salesforce context (Flow 1) ───────────────────────────────────────
 
-def store_pending_sf_context(phone: str, sf_id: str, card_json: dict) -> None:
+def store_pending_sf_context(phone: str, sf_id: str, card_json: dict, message_id: str = "") -> None:
     """Upsert pending SF context for a user so a follow-up voice note can update the record."""
     with _LOCK:
         try:
             _get_sf_context_collection().update_one(
-                {"phone": phone},
+                {"phone": phone, "context_message_id": message_id},
                 {"$set": {
                     "phone": phone,
                     "sf_id": sf_id,
                     "card_json": card_json,
+                    "context_message_id": message_id,
                     "created_at": _utc_now_iso(),
                 }},
                 upsert=True,
