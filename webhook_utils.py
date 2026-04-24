@@ -436,7 +436,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         from datetime import timedelta
         import re
         event = payload.get("event")
-        print(f"Original event data for Salesforce update: {event}")
+        print(f"Original payload data for Salesforce update: {payload}")
         meeting_datetime = event.get("meetingDateTime") or event.get("date") or event.get("due_date") or event.get("raw_text") or ""
 
         def resolve_weekday_to_date(weekday_str):
@@ -538,6 +538,7 @@ def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
     """Always include SF ID in the status string so it reaches the WhatsApp reply."""
     if not salesforce_result:
         return ""
+    print(f"Salesforce result for status message: {salesforce_result}")
     sf_id = salesforce_result.get("salesforce_id")
     if salesforce_result.get("ok"):
         if sf_id:
