@@ -60,7 +60,7 @@ def _detect_extension(kind: str, content_type: Optional[str]) -> str:
 def _build_s3_key(kind: str, ext: str, incoming_message_id: Optional[str]) -> str:
     message_part = incoming_message_id or "no_message_id"
     unique_id = uuid4().hex
-    return f"{S3_PREFIX}/{kind}_{message_part}_{unique_id}.{ext}"
+    return f"{S3_PREFIX}/{kind}/{message_part}_{unique_id}.{ext}"
 
 
 def _fetch_media_download_url(media_id: str) -> Optional[str]:
