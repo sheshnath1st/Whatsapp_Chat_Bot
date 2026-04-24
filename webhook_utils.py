@@ -137,6 +137,7 @@ from conversation_store import (
     upsert_conversation_message,
     update_conversation_sf_and_context,
     get_recent_messages,
+    get_conversation,
 )
 
 load_dotenv()
@@ -1047,13 +1048,18 @@ async def llm_reply_to_text_v2(
                 message_content_str = message_content
 
             # --- Always update Salesforce lead with reply detail ---
-            # Try to get sf_id from context (pending SF context or from message_content)
+            # Try to get sf_id from context (pending SF context, conversation, or message_content)
             sf_context = get_pending_sf_context(user_phone)
             if sf_context and sf_context.get("sf_id"):
                 sf_id = sf_context["sf_id"]
-            elif isinstance(message_content, dict):
-                # Try to get from message_content
-                sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
+            else:
+                # Fallback: get from conversation context
+                conv = get_conversation(user_phone)
+                if conv and conv.get("sf_id"):
+                    sf_id = conv["sf_id"]
+                elif isinstance(message_content, dict):
+                    # Try to get from message_content
+                    sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
 
             # If we have an sf_id, update the lead with the reply detail
             if sf_id:
@@ -1069,6 +1075,8 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
+                # Always update conversation context with latest sf_id
+                loop.run_in_executor(None, lambda: update_conversation_sf_and_context(user_phone, sf_id=sf_id))
             elif salesforce_payload:
                 # Fallback: create new if no sf_id
                 loop = asyncio.get_running_loop()
@@ -1076,6 +1084,8 @@ async def llm_reply_to_text_v2(
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
                     salesforce_payload["salesforce_id"] = sf_id
+                    # Always update conversation context with latest sf_id
+                    loop.run_in_executor(None, lambda: update_conversation_sf_and_context(user_phone, sf_id=sf_id))
                 sf_status = _salesforce_status_message(salesforce_result)
             else:
                 sf_status = None
