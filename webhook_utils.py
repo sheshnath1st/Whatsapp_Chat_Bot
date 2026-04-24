@@ -500,7 +500,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             payload["transcript"] = payload["transcript"]
         payload["leadId"] = sf_id
         # --- End relative date resolution logic ---
-
+        print(f"=======Updating Salesforce record {sf_id} with payload: {payload}")
         url = f"{SALESFORCE_API_URL}/{sf_id}"
         headers = {"Content-Type": JSON_CONTENT_TYPE}
         if SALESFORCE_COOKIE:
@@ -512,7 +512,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             response_body = response.json()
         except Exception:
             response_body = response.text
-
+        print(f"Salesforce update response for record {sf_id}: {response_body}")
         if 200 <= response.status_code < 300:
             print(f"Salesforce record {sf_id} updated successfully")
             return {"ok": True, "status_code": response.status_code, "response": response_body}
@@ -817,6 +817,7 @@ async def _handle_audio_event_flow(
     )
 
 def get_next_weekday(target_day_name: str):
+    print(f"Resolving next weekday for input: {target_day_name}")
     if not target_day_name or not isinstance(target_day_name, str):
         return None
     WEEKDAYS = {
