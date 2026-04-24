@@ -19,7 +19,7 @@ def normalize_numbers(text: str) -> str:
 
 def resolve_datetime(text: str) -> str:
     if not text:
-        return None
+        return text
 
     text = normalize_numbers(text.lower())
     now = datetime.now()
