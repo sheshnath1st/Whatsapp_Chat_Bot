@@ -140,12 +140,12 @@ def store_pending_sf_context(phone: str, sf_id: str, card_json: dict) -> None:
             print(f"MongoDB store_pending_sf_context failed: {exc}")
 
 
-def get_pending_sf_context(phone: str) -> Optional[dict]:
+def get_pending_sf_context(phone: str, context_message_id: str) -> Optional[dict]:
     """Return pending SF context if it exists and is within TTL, else None."""
     with _LOCK:
         try:
             col = _get_sf_context_collection()
-            doc = col.find_one({"phone": phone})
+            doc = col.find_one({"phone": phone, "context_message_id": context_message_id})
             if not doc:
                 return None
             created_at = doc.get("created_at")
@@ -153,7 +153,7 @@ def get_pending_sf_context(phone: str) -> Optional[dict]:
                 created_dt = datetime.fromisoformat(created_at)
                 age = (datetime.now(timezone.utc) - created_dt).total_seconds()
                 if age > _SF_CONTEXT_TTL_SECONDS:
-                    col.delete_one({"phone": phone})
+                    col.delete_one({"phone": phone, "context_message_id": context_message_id})
                     return None
             return {"sf_id": doc.get("sf_id"), "card_json": doc.get("card_json")}
         except (RuntimeError, PyMongoError) as exc:
@@ -161,11 +161,11 @@ def get_pending_sf_context(phone: str) -> Optional[dict]:
             return None
 
 
-def clear_pending_sf_context(phone: str) -> None:
+def clear_pending_sf_context(phone: str, context_message_id: str) -> None:
     """Delete pending SF context after the follow-up voice note has been processed."""
     with _LOCK:
         try:
-            _get_sf_context_collection().delete_one({"phone": phone})
+            _get_sf_context_collection().delete_one({"phone": phone, "context_message_id": context_message_id})
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB clear_pending_sf_context failed: {exc}")
 

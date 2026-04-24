@@ -850,11 +850,12 @@ async def llm_reply_to_text_v2(
     media_id: str = None,
     kind: str = None,
     incoming_message_id: str = None,
+    context_message_id: str = None,
 ):
     try:
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
         if kind == "audio" and media_id:
-            sf_context = get_pending_sf_context(user_phone)
+            sf_context = get_pending_sf_context(user_phone,context_message_id)
             if sf_context:
                 await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
                 return
@@ -1066,7 +1067,7 @@ async def llm_reply_to_text_v2(
 
             # --- Always update Salesforce lead with reply detail ---
             # Try to get sf_id from context (pending SF context, conversation, or message_content)
-            sf_context = get_pending_sf_context(user_phone)
+            sf_context = get_pending_sf_context(user_phone, context_message_id)
             if sf_context and sf_context.get("sf_id"):
                 sf_id = sf_context["sf_id"]
             else:
