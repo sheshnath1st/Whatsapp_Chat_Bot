@@ -71,7 +71,7 @@ def resolve_datetime(text: str) -> str:
     # --- WEEKDAY ---
     else:
         for wd in WEEKDAYS:
-            if re.search(rf"\b(next\s+|on\s+|after\s+)?{wd}\b", text):
+            if re.search(rf"\b(this\s+|next\s+|on\s+|after\s+)?{wd}\b", text):
                 today_idx = now.weekday()
                 target_idx = WEEKDAYS.index(wd)
                 days_ahead = (target_idx - today_idx + 7) % 7
