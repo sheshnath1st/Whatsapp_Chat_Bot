@@ -746,7 +746,7 @@ async def _handle_audio_event_flow(
     loop = asyncio.get_running_loop()
     sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
 
-    clear_pending_sf_context(user_phone)
+    # clear_pending_sf_context(user_phone)
 
     # Save transcript + event to MongoDB contacts collection (Flow 1 follow-up)
     update_contact_event(
@@ -1043,6 +1043,23 @@ async def llm_reply_to_text_v2(
 
             if isinstance(message_content, dict):
                 salesforce_payload = _to_salesforce_payload(message_content)
+                # --- Ensure meetingDateTime is always resolved and set if event date is present ---
+                event = message_content.get("event") if isinstance(message_content.get("event"), dict) else None
+                if event:
+                    raw_date = event.get("date") or event.get("due_date")
+                    raw_time = event.get("time") or event.get("due_time")
+                    raw_text = event.get("rawText") or event.get("raw_text") or raw_date
+                    # Combine date and time if both present, else use raw_text
+                    dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
+                    meeting_datetime = resolve_datetime(dt_input)
+                    if meeting_datetime:
+                        salesforce_payload["meetingDateTime"] = meeting_datetime
+                    elif raw_date:
+                        # If only date is present, default to 10:00
+                        dt_input = f"{raw_date} 10:00"
+                        meeting_datetime = resolve_datetime(dt_input)
+                        if meeting_datetime:
+                            salesforce_payload["meetingDateTime"] = meeting_datetime
                 message_content_str = _format_extraction_reply(message_content, kind)
             else:
                 message_content_str = message_content
