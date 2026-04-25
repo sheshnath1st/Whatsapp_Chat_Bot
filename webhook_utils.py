@@ -711,37 +711,48 @@ async def _handle_audio_event_flow(
 
     meeting_datetime = None
 
+
+    def clean_value(val):
+        if not val:
+            return None
+        val = str(val).strip().lower()
+        if val in ["null", "none", ""]:
+            return None
+        return val
+
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
 
-        # --- Extract raw values ---
-        raw_date = event.get("date") or event.get("due_date")
-        raw_time = event.get("time") or event.get("due_time")
-        raw_text = event.get("rawText") or event.get("raw_text")
+        raw_date = clean_value(event.get("date") or event.get("due_date"))
+        raw_time = clean_value(event.get("time") or event.get("due_time"))
+        raw_text = clean_value(event.get("rawText") or event.get("raw_text"))
 
-        # --- Build clean datetime input ---
-        dt_parts = []
+        dt_input = None
 
-        if raw_date and str(raw_date).lower() not in ["null", "none"]:
-            dt_parts.append(str(raw_date).strip())
+        # Case 1: structured values
+        if raw_date or raw_time:
+            parts = []
+            if raw_date:
+                parts.append(raw_date)
+            if raw_time:
+                parts.append(raw_time)
+            dt_input = " ".join(parts)
 
-        if raw_time and str(raw_time).lower() not in ["null", "none"]:
-            dt_parts.append(str(raw_time).strip())
-
-        dt_input = " ".join(dt_parts).strip()
-
-        if not dt_input:
+        # Case 2: raw_text fallback
+        if not dt_input and raw_text:
             dt_input = raw_text
+
+        # Case 3: FINAL fallback → transcript
+        if not dt_input:
+            dt_input = normalized_transcript
 
         print(f"[DT INPUT]: {dt_input}")
 
         # --- Resolve datetime with timezone ---
         if dt_input:
             try:
-                # user_tz = get_user_timezone(user_phone) or "Asia/Kolkata"
                 meeting_datetime = resolve_datetime(dt_input)
                 print(f"[RESOLVED DATETIME]: {meeting_datetime}")
-
             except Exception as e:
                 print(f"Datetime resolution failed: {e}")
                 meeting_datetime = raw_date
