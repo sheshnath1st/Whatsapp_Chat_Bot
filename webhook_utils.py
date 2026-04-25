@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 MONTHS = {
@@ -22,7 +22,7 @@ def resolve_datetime(text: str) -> str:
         return text
 
     text = normalize_numbers(text.lower())
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     base_date = None
 
     # --- RELATIVE ---
@@ -418,122 +418,90 @@ def send_to_salesforce(business_card_data: dict):
             payload={"business_card_data": business_card_data},
         )
         return {"ok": False, "error": str(exc)}
-
-
+    
 def send_to_salesforce_update(sf_id: str, payload: dict):
-    """PATCH an existing Salesforce record with transcript and event data."""
+    """Update Salesforce record with safe fallback datetime resolution."""
+
     if not SALESFORCE_API_URL:
-        print("Warning: SALESFORCE_API_URL not configured, skipping Salesforce update")
-        log_failure(
-            source="send_to_salesforce_update.not_configured",
-            error="salesforce_url_not_configured",
-            payload={"sf_id": sf_id, "payload": payload},
-        )
+        print("Warning: SALESFORCE_API_URL not configured")
         return {"ok": False, "error": "salesforce_url_not_configured"}
 
     try:
-        # --- Relative date resolution logic ---
-        from datetime import timedelta
-        import re
-        event = payload.get("event")
-        print(f"Original payload data for Salesforce update: {payload}")
-        meeting_datetime = event.get("meetingDateTime") or event.get("date") or event.get("due_date") or event.get("raw_text") or ""
+        print(f"Updating Salesforce record {sf_id} with payload: {payload}")
 
-        def resolve_weekday_to_date(weekday_str):
-            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            if weekday_str and isinstance(weekday_str, str) and weekday_str.lower() in weekdays:
-                today = datetime.now(timezone.utc)
-                i = weekdays.index(weekday_str.lower())
-                days_ahead = (i - today.weekday() + 7) % 7
-                days_ahead = days_ahead or 7
-                return (today + timedelta(days=days_ahead)).date().isoformat()
-            return None
+        payload = payload or {}
+        event = payload.get("event") or {}
 
-        if isinstance(event, dict):
-            date_val = event.get("date")
-            time_val = event.get("time") or event.get("due_time")
-            raw_text = event.get("raw_text") or ""
+        meeting_datetime = payload.get("meetingDateTime")
 
-            # Always resolve weekday in date_val
-            resolved_date = resolve_weekday_to_date(date_val)
-            if resolved_date:
-                event["date"] = resolved_date
-                date_val = resolved_date
+        # 🔥 Fallback only if missing
+        if not meeting_datetime:
+            raw_date = event.get("date") or event.get("due_date")
+            raw_time = event.get("time") or event.get("due_time")
+            raw_text = event.get("rawText") or event.get("raw_text")
 
-            # If date is missing or null, try to resolve relative date from raw_text
-            if (date_val is None or str(date_val).lower() == "null" or not str(date_val).strip()) and raw_text:
-                match = re.search(r"(\d+)\s+days?\s*(from\s+today|later|after)?", raw_text, re.IGNORECASE)
-                if match:
-                    days = int(match.group(1))
-                    resolved_date = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
-                    event["date"] = resolved_date
-                    date_val = resolved_date
-                else:
-                    if re.search(r"tomorrow", raw_text, re.IGNORECASE):
-                        resolved_date = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
-                        event["date"] = resolved_date
-                        date_val = resolved_date
-                    elif re.search(r"next week", raw_text, re.IGNORECASE):
-                        resolved_date = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
-                        event["date"] = resolved_date
-                        date_val = resolved_date
-                    else:
-                        # Also resolve weekday in raw_text
-                        for wd in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
-                            if re.search(wd, raw_text, re.IGNORECASE):
-                                resolved_date = resolve_weekday_to_date(wd)
-                                if resolved_date:
-                                    event["date"] = resolved_date
-                                    date_val = resolved_date
-                                    break
+            # ✅ Build clean input
+            dt_parts = []
 
-            # If time is missing, default to 10:00:00
-            if not time_val or not str(time_val).strip():
-                time_val = "10:00:00"
-            # If both date and time are present, build ISO datetime
-            if date_val:
-                meeting_datetime = f"{date_val}T{time_val}"
-        # Add meetingDateTime, transcript, and leadId to payload for Salesforce update
+            if raw_date and str(raw_date).lower() != "null":
+                dt_parts.append(str(raw_date).strip())
+
+            if raw_time and str(raw_time).lower() != "null":
+                dt_parts.append(str(raw_time).strip())
+
+            dt_input = " ".join(dt_parts).strip()
+
+            if not dt_input:
+                dt_input = raw_text
+
+            # ✅ Resolve datetime
+            if dt_input:
+                # user_tz = payload.get("timezone") or "Asia/Kolkata"
+                meeting_datetime = resolve_datetime(dt_input)
+
+        # ✅ Set final value
         if meeting_datetime:
-            payload["meetingDateTime"] = get_next_weekday(resolve_datetime(meeting_datetime))
-        if "transcript" in payload:
-            payload["transcript"] = payload["transcript"]
+            payload["meetingDateTime"] = meeting_datetime
+
+        # ✅ Always include leadId
         payload["leadId"] = sf_id
-        # --- End relative date resolution logic ---
-        print(f"=======Updating Salesforce record {sf_id} with payload: {payload}")
+
+        # --- API call ---
         url = f"{SALESFORCE_API_URL}/{sf_id}"
         headers = {"Content-Type": JSON_CONTENT_TYPE}
+
         if SALESFORCE_COOKIE:
             headers["Cookie"] = SALESFORCE_COOKIE
+
         response = requests.post(url, headers=headers, json=payload, timeout=15)
 
-        response_body = None
         try:
             response_body = response.json()
         except Exception:
             response_body = response.text
-        print(f"Salesforce update response for record {sf_id}: {response_body}")
+
+        print(f"Salesforce response: {response_body}")
+
         if 200 <= response.status_code < 300:
-            print(f"Salesforce record {sf_id} updated successfully")
-            return {"ok": True, "status_code": response.status_code, "response": response_body}
-        else:
-            print(f"Salesforce update error (status {response.status_code}): {response.text}")
-            log_failure(
-                source="send_to_salesforce_update.api_error",
-                error="salesforce_api_error",
-                payload={"sf_id": sf_id, "status_code": response.status_code, "response": response_body},
-            )
-            return {"ok": False, "status_code": response.status_code, "error": "salesforce_api_error"}
+            return {
+                "ok": True,
+                "status_code": response.status_code,
+                "response": response_body,
+                "salesforce_id": sf_id
+            }
+
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "error": "salesforce_api_error",
+            "response": response_body,
+            "salesforce_id": sf_id
+        }
+
     except Exception as exc:
-        print(f"Error updating Salesforce record: {exc}")
-        log_failure(
-            source="send_to_salesforce_update.exception",
-            error=str(exc),
-            payload={"sf_id": sf_id, "payload": payload},
-        )
-        return {"ok": False, "error": str(exc)}
-
-
+        print(f"Error updating Salesforce: {exc}")
+        return {"ok": False, "error": str(exc), "salesforce_id": sf_id}
+    
 def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
     """Always include SF ID in the status string so it reaches the WhatsApp reply."""
     if not salesforce_result:
@@ -692,23 +660,21 @@ def send_audio_message(to: str, file_path: str):
         )
         return {"ok": False, "error": "audio_upload_failed", "status_code": response.status_code}
 
-
-
-
-
-
 async def _handle_audio_event_flow(
     user_phone: str,
     media_id: str,
     incoming_message_id: str,
     sf_context: dict,
 ):
-    """Flow 1 step 6-9: User sent audio reply to a card scan. Transcribe, extract event, update SF."""
+    """Flow: Audio → Transcription → Event extraction → Salesforce update"""
+
     sf_id = sf_context["sf_id"]
     headers = {"accept": "application/json", "Content-Type": "application/json"}
     json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
 
     print(f"[Flow1] Audio follow-up for SF record {sf_id}")
+
+    # --- Call LLM API ---
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{AGENT_URL}/llm-response",
@@ -719,82 +685,145 @@ async def _handle_audio_event_flow(
 
     if response.status_code != 200:
         print(f"[Flow1] audio_event endpoint error: {response.status_code}")
-        await send_message_async(user_phone, "Could not process your voice message. Please try again.")
+        await send_message_async(
+            user_phone,
+            "Could not process your voice message. Please try again."
+        )
         return
 
     response_data = response.json()
     result = response_data.get("response") or {}
-    transcript = result.get("transcript", "")
+
+    transcript = result.get("transcript", "") or ""
+    normalized_transcript = normalize_numbers(transcript)
+
     event = result.get("event") or {}
 
+    # --- Prepare Salesforce payload ---
+    sf_update_payload = {"transcript": normalized_transcript}
 
-    # --- Backend: resolve ISO datetime from LLM event extraction ---
-    sf_update_payload = {"transcript": normalize_numbers(transcript)}
+    meeting_datetime = None
+
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
-        # Compose raw date/time string for resolution
+
+        # --- Extract raw values ---
         raw_date = event.get("date") or event.get("due_date")
         raw_time = event.get("time") or event.get("due_time")
-        raw_text = event.get("rawText") or event.get("raw_text") or raw_date
-        # Combine date and time if both present, else use raw_text
-        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
-        meeting_datetime = resolve_datetime(dt_input)
-        if meeting_datetime:
-            sf_update_payload["meetingDateTime"] = get_next_weekday(meeting_datetime)
+        raw_text = event.get("rawText") or event.get("raw_text")
 
+        # --- Build clean datetime input ---
+        dt_parts = []
+
+        if raw_date and str(raw_date).lower() not in ["null", "none"]:
+            dt_parts.append(str(raw_date).strip())
+
+        if raw_time and str(raw_time).lower() not in ["null", "none"]:
+            dt_parts.append(str(raw_time).strip())
+
+        dt_input = " ".join(dt_parts).strip()
+
+        if not dt_input:
+            dt_input = raw_text
+
+        print(f"[DT INPUT]: {dt_input}")
+
+        # --- Resolve datetime with timezone ---
+        if dt_input:
+            try:
+                # user_tz = get_user_timezone(user_phone) or "Asia/Kolkata"
+                meeting_datetime = resolve_datetime(dt_input)
+                print(f"[RESOLVED DATETIME]: {meeting_datetime}")
+
+            except Exception as e:
+                print(f"Datetime resolution failed: {e}")
+                meeting_datetime = raw_date
+
+    # --- Add resolved datetime ---
+    if meeting_datetime:
+        sf_update_payload["meetingDateTime"] = meeting_datetime
+
+    # --- Send to Salesforce ---
     loop = asyncio.get_running_loop()
-    sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
+    sf_result = await loop.run_in_executor(
+        None,
+        send_to_salesforce_update,
+        sf_id,
+        sf_update_payload
+    )
 
+    # --- Clear context ---
     clear_pending_sf_context(user_phone)
 
-    # Save transcript + event to MongoDB contacts collection (Flow 1 follow-up)
+    # --- Save to MongoDB ---
     update_contact_event(
         phone=user_phone,
         sf_id=sf_id,
-        transcript=normalize_numbers(transcript),
+        transcript=normalized_transcript,
         event=event if isinstance(event, dict) and any(event.values()) else None,
     )
 
-    # Save audio message to conversation thread
+    # --- Save conversation ---
     audio_doc = _build_audio_message_doc(
         message_id=incoming_message_id,
         media_id=media_id,
-        transcript=normalize_numbers(transcript),
+        transcript=normalized_transcript,
         event=event if isinstance(event, dict) and any(event.values()) else None,
         salesforce_payload=sf_update_payload,
         salesforce_result=sf_result,
         reply_to=None,
     )
+
     upsert_conversation_message(user_phone, audio_doc)
+
+    # --- Update conversation metadata ---
     event_type = (event or {}).get("event_type") or (event or {}).get("type")
     event_date = (event or {}).get("due_date") or (event or {}).get("date")
+
     update_conversation_sf_and_context(
         user_phone,
-        last_intent=event_type if event_type and event_type.lower() != "none" else None,
+        last_intent=event_type if event_type and str(event_type).lower() != "none" else None,
         last_event_date=event_date,
     )
 
-
+    # --- Build response message ---
     event_summary = ""
-    meeting_datetime = get_next_weekday(sf_update_payload.get("meetingDateTime"))
     if isinstance(event, dict):
         event_type = event.get("event_type") or event.get("type")
         event_date = event.get("due_date") or event.get("date")
         event_time = event.get("due_time") or event.get("time")
+
         if event_type and str(event_type).lower() != "none":
             parts = [event_type]
+
             if event_date:
-                parts.append(event_date)
+                parts.append(str(event_date))
+
             if event_time:
-                parts.append(event_time)
+                parts.append(str(event_time))
+
             event_summary = f"\nEvent: {' | '.join(parts)}"
+
             if meeting_datetime:
                 event_summary += f"\nSchedule Date: {meeting_datetime}"
 
-    sf_status = "Salesforce record updated." if (sf_result or {}).get("ok") else "Salesforce update failed."
-    reply = f"Voice note received.\nTranscript: {transcript}{event_summary}\n\n{sf_status} (ID: {sf_id})"
+    sf_status = (
+        f"Salesforce updated (ID: {sf_id})"
+        if (sf_result or {}).get("ok")
+        else f"Salesforce update failed (ID: {sf_id})"
+    )
 
+    reply = (
+        f"Voice note received.\n"
+        f"Transcript: {normalized_transcript}"
+        f"{event_summary}\n\n"
+        f"{sf_status}"
+    )
+
+    # --- Send reply ---
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
+
+    # --- Logging ---
     log_event(
         event_type="outgoing_message",
         direction="outgoing",
@@ -804,44 +833,23 @@ async def _handle_audio_event_flow(
         payload={
             "kind": "audio_event",
             "sf_id": sf_id,
-            "transcript": transcript,
+            "transcript": normalized_transcript,
             "event": event,
             "sf_result": sf_result,
         },
     )
+
     log_event(
         event_type="salesforce_sync",
         direction="system",
         phone=user_phone,
         related_message_id=incoming_message_id,
-        payload={"sf_id": sf_id, "sf_update_payload": sf_update_payload, "sf_result": sf_result},
+        payload={
+            "sf_id": sf_id,
+            "sf_update_payload": sf_update_payload,
+            "sf_result": sf_result,
+        },
     )
-
-def get_next_weekday(target_day_name: str):
-    print(f"Resolving next weekday for input: {target_day_name}")
-    if not target_day_name or not isinstance(target_day_name, str):
-        return None
-    WEEKDAYS = {
-        "monday": 0, "tuesday": 1, "wednesday": 2,
-        "thursday": 3, "friday": 4,
-        "saturday": 5, "sunday": 6
-    }
-    print(f"Resolving next weekday for: {target_day_name}")
-    # 🔴 FIX: if already datetime → return as-is
-    if re.match(r"\d{4}-\d{2}-\d{2}", target_day_name):
-        return target_day_name
-    today = datetime.now()
-    today_day = today.weekday()
-
-    target_day = WEEKDAYS[target_day_name.strip().lower()]
-
-    days_ahead = (target_day - today_day + 7) % 7
-    if days_ahead == 0:
-        days_ahead = 7  # next Monday, not today
-
-    next_date = today + timedelta(days=days_ahead)
-
-    return next_date.strftime("%Y-%m-%d-T%H:%M:%S")
 
 async def llm_reply_to_text_v2(
     user_input: str,
