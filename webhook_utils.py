@@ -1,22 +1,3 @@
-from llm_prompts import CRM_ASSISTANT_PROMPT
-
-def resolve_meeting_datetime(event: dict) -> str | None:
-    """Given an event dict with normalized date/time fields, return ISO 8601 meetingDateTime or None."""
-    if not event or not isinstance(event, dict):
-        return None
-    raw_date = event.get("date") or event.get("due_date")
-    raw_time = event.get("time") or event.get("due_time")
-    raw_text = event.get("rawText") or event.get("raw_text") or raw_date
-    meeting_datetime = None
-    if raw_date:
-        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
-        meeting_datetime = resolve_datetime(dt_input)
-        if not meeting_datetime:
-            dt_input = f"{raw_date} 10:00"
-            meeting_datetime = resolve_datetime(dt_input)
-        if not meeting_datetime:
-            meeting_datetime = resolve_datetime(raw_date)
-    return meeting_datetime
 import re
 from datetime import datetime, timedelta
 
@@ -156,7 +137,6 @@ from conversation_store import (
     upsert_conversation_message,
     update_conversation_sf_and_context,
     get_recent_messages,
-    get_conversation,
 )
 
 load_dotenv()
@@ -723,20 +703,12 @@ async def _handle_audio_event_flow(
     incoming_message_id: str,
     sf_context: dict,
 ):
-    """
-    Flow 1: Audio reply to business card scan.
-    Steps:
-    1. Transcribe audio (via LLM endpoint)
-    2. Extract event from transcript (via LLM)
-    3. Update Salesforce with transcript, event, and correct SF-ID
-    4. Persist all context and log events robustly
-    """
+    """Flow 1 step 6-9: User sent audio reply to a card scan. Transcribe, extract event, update SF."""
     sf_id = sf_context["sf_id"]
     headers = {"accept": "application/json", "Content-Type": "application/json"}
     json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
 
     print(f"[Flow1] Audio follow-up for SF record {sf_id}")
-    # Step 1: Transcribe audio and extract event
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{AGENT_URL}/llm-response",
@@ -755,7 +727,8 @@ async def _handle_audio_event_flow(
     transcript = result.get("transcript", "")
     event = result.get("event") or {}
 
-    # Step 2: Prepare Salesforce update payload (always include all required fields)
+
+    # --- Backend: resolve ISO datetime from LLM event extraction ---
     sf_update_payload = {"transcript": normalize_numbers(transcript)}
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
@@ -763,19 +736,18 @@ async def _handle_audio_event_flow(
         raw_date = event.get("date") or event.get("due_date")
         raw_time = event.get("time") or event.get("due_time")
         raw_text = event.get("rawText") or event.get("raw_text") or raw_date
+        # Combine date and time if both present, else use raw_text
         dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
         meeting_datetime = resolve_datetime(dt_input)
         if meeting_datetime:
             sf_update_payload["meetingDateTime"] = get_next_weekday(meeting_datetime)
-    # Always ensure all required keys are present
-    for key in ["transcript", "event", "meetingDateTime"]:
-        sf_update_payload.setdefault(key, None)
 
-    # Step 3: Update Salesforce
     loop = asyncio.get_running_loop()
     sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
 
-    # Step 4: Persist context and log
+    clear_pending_sf_context(user_phone)
+
+    # Save transcript + event to MongoDB contacts collection (Flow 1 follow-up)
     update_contact_event(
         phone=user_phone,
         sf_id=sf_id,
@@ -783,6 +755,7 @@ async def _handle_audio_event_flow(
         event=event if isinstance(event, dict) and any(event.values()) else None,
     )
 
+    # Save audio message to conversation thread
     audio_doc = _build_audio_message_doc(
         message_id=incoming_message_id,
         media_id=media_id,
@@ -801,7 +774,7 @@ async def _handle_audio_event_flow(
         last_event_date=event_date,
     )
 
-    # Step 5: Build user-facing reply
+
     event_summary = ""
     meeting_datetime = get_next_weekday(sf_update_payload.get("meetingDateTime"))
     if isinstance(event, dict):
@@ -876,12 +849,11 @@ async def llm_reply_to_text_v2(
     media_id: str = None,
     kind: str = None,
     incoming_message_id: str = None,
-    context_message_id: str = None,
 ):
     try:
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
         if kind == "audio" and media_id:
-            sf_context = get_pending_sf_context(user_phone,context_message_id)
+            sf_context = get_pending_sf_context(user_phone)
             if sf_context:
                 await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
                 return
@@ -1070,28 +1042,18 @@ async def llm_reply_to_text_v2(
 
             if isinstance(message_content, dict):
                 salesforce_payload = _to_salesforce_payload(message_content)
-                # --- Ensure meetingDateTime is always resolved and set if event date is present ---
-                event = message_content.get("event") if isinstance(message_content.get("event"), dict) else None
-                meeting_datetime = resolve_meeting_datetime(event)
-                if meeting_datetime:
-                    salesforce_payload["meetingDateTime"] = meeting_datetime
                 message_content_str = _format_extraction_reply(message_content, kind)
             else:
                 message_content_str = message_content
 
             # --- Always update Salesforce lead with reply detail ---
-            # Try to get sf_id from context (pending SF context, conversation, or message_content)
-            sf_context = get_pending_sf_context(user_phone, context_message_id)
+            # Try to get sf_id from context (pending SF context or from message_content)
+            sf_context = get_pending_sf_context(user_phone)
             if sf_context and sf_context.get("sf_id"):
                 sf_id = sf_context["sf_id"]
-            else:
-                # Fallback: get from conversation context
-                conv = get_conversation(user_phone)
-                if conv and conv.get("sf_id"):
-                    sf_id = conv["sf_id"]
-                elif isinstance(message_content, dict):
-                    # Try to get from message_content
-                    sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
+            elif isinstance(message_content, dict):
+                # Try to get from message_content
+                sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
 
             # If we have an sf_id, update the lead with the reply detail
             if sf_id:
@@ -1107,8 +1069,6 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
-                # Always update conversation context with latest sf_id
-                loop.run_in_executor(None, lambda: update_conversation_sf_and_context(user_phone, sf_id=sf_id))
             elif salesforce_payload:
                 # Fallback: create new if no sf_id
                 loop = asyncio.get_running_loop()
@@ -1116,8 +1076,6 @@ async def llm_reply_to_text_v2(
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
                     salesforce_payload["salesforce_id"] = sf_id
-                    # Always update conversation context with latest sf_id
-                    loop.run_in_executor(None, lambda: update_conversation_sf_and_context(user_phone, sf_id=sf_id))
                 sf_status = _salesforce_status_message(salesforce_result)
             else:
                 sf_status = None
@@ -1175,7 +1133,6 @@ async def llm_reply_to_text_v2(
                     user_phone,
                     sf_id,
                     message_content if isinstance(message_content, dict) else {},
-                    message_id=incoming_message_id  
                 )
                 sf_status = f"{sf_status}\nReply with a voice note to add a follow-up event."
 
