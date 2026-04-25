@@ -20,7 +20,8 @@ def normalize_numbers(text: str) -> str:
 def resolve_datetime(text: str) -> str:
     if not text:
         return text
-
+    if re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", text):
+        return text
     text = normalize_numbers(text.lower())
     now = datetime.now(timezone.utc)
     base_date = None
