@@ -13,7 +13,7 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "whatsapp_bot")
 MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "conversation_events")
 MONGODB_FAILURE_COLLECTION = os.getenv("MONGODB_FAILURE_COLLECTION", "conversation_failures")
-_SF_CONTEXT_COLLECTION = os.getenv("MONGODB_SF_CONTEXT_COLLECTION", "contacts")
+_SF_CONTEXT_COLLECTION = os.getenv("MONGODB_SF_CONTEXT_COLLECTION", "pending_sf_contexts")
 _SF_CONTEXT_TTL_SECONDS = int(os.getenv("SF_CONTEXT_TTL_SECONDS", "86400"))
 _CONTACTS_COLLECTION = os.getenv("MONGODB_CONTACTS_COLLECTION", "contacts")
 _CONVERSATIONS_COLLECTION = os.getenv("MONGODB_CONVERSATIONS_COLLECTION", "conversations")
@@ -122,17 +122,16 @@ def get_conversation_history(phone: str, limit: int = 20):
 
 # ── Pending Salesforce context (Flow 1) ───────────────────────────────────────
 
-def store_pending_sf_context(phone: str, sf_id: str, card_json: dict, message_id: str = "") -> None:
+def store_pending_sf_context(phone: str, sf_id: str, card_json: dict) -> None:
     """Upsert pending SF context for a user so a follow-up voice note can update the record."""
     with _LOCK:
         try:
             _get_sf_context_collection().update_one(
-                {"phone": phone, "context_message_id": message_id},
+                {"phone": phone},
                 {"$set": {
                     "phone": phone,
                     "sf_id": sf_id,
                     "card_json": card_json,
-                    "context_message_id": message_id,
                     "created_at": _utc_now_iso(),
                 }},
                 upsert=True,
@@ -141,12 +140,12 @@ def store_pending_sf_context(phone: str, sf_id: str, card_json: dict, message_id
             print(f"MongoDB store_pending_sf_context failed: {exc}")
 
 
-def get_pending_sf_context(phone: str, context_message_id: str) -> Optional[dict]:
+def get_pending_sf_context(phone: str) -> Optional[dict]:
     """Return pending SF context if it exists and is within TTL, else None."""
     with _LOCK:
         try:
             col = _get_sf_context_collection()
-            doc = col.find_one({"phone": phone, "context_message_id": context_message_id})
+            doc = col.find_one({"phone": phone})
             if not doc:
                 return None
             created_at = doc.get("created_at")
@@ -154,7 +153,7 @@ def get_pending_sf_context(phone: str, context_message_id: str) -> Optional[dict
                 created_dt = datetime.fromisoformat(created_at)
                 age = (datetime.now(timezone.utc) - created_dt).total_seconds()
                 if age > _SF_CONTEXT_TTL_SECONDS:
-                    col.delete_one({"phone": phone, "context_message_id": context_message_id})
+                    col.delete_one({"phone": phone})
                     return None
             return {"sf_id": doc.get("sf_id"), "card_json": doc.get("card_json")}
         except (RuntimeError, PyMongoError) as exc:
@@ -162,11 +161,11 @@ def get_pending_sf_context(phone: str, context_message_id: str) -> Optional[dict
             return None
 
 
-def clear_pending_sf_context(phone: str, context_message_id: str) -> None:
+def clear_pending_sf_context(phone: str) -> None:
     """Delete pending SF context after the follow-up voice note has been processed."""
     with _LOCK:
         try:
-            _get_sf_context_collection().delete_one({"phone": phone, "context_message_id": context_message_id})
+            _get_sf_context_collection().delete_one({"phone": phone})
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB clear_pending_sf_context failed: {exc}")
 
