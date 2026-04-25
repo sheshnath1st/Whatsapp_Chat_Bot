@@ -461,7 +461,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
 
         # ✅ Set final value
         if meeting_datetime:
-            payload["meetingDateTime"] = meeting_datetime
+            payload["meetingDateTime"] = resolve_datetime(meeting_datetime)
 
         # ✅ Always include leadId
         payload["leadId"] = sf_id
@@ -741,7 +741,7 @@ async def _handle_audio_event_flow(
 
     # --- Add resolved datetime ---
     if meeting_datetime:
-        sf_update_payload["meetingDateTime"] = meeting_datetime
+        sf_update_payload["meetingDateTime"] = resolve_datetime(meeting_datetime)
 
     # --- Send to Salesforce ---
     loop = asyncio.get_running_loop()
