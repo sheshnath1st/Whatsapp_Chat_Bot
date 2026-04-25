@@ -710,9 +710,7 @@ async def _handle_audio_event_flow(
 
     # --- Prepare Salesforce payload ---
     sf_update_payload = {"transcript": normalized_transcript}
-
     meeting_datetime = None
-
 
     def clean_value(val):
         if not val:
@@ -722,46 +720,46 @@ async def _handle_audio_event_flow(
             return None
         return val
 
+    # Always process datetime, even if event is empty
+    raw_date = clean_value((event or {}).get("date") or (event or {}).get("due_date"))
+    raw_time = clean_value((event or {}).get("time") or (event or {}).get("due_time"))
+    raw_text = clean_value((event or {}).get("rawText") or (event or {}).get("raw_text"))
+
+    dt_input = None
+    # Case 1: structured values
+    if raw_date or raw_time:
+        parts = []
+        if raw_date:
+            parts.append(raw_date)
+        if raw_time:
+            parts.append(raw_time)
+        dt_input = " ".join(parts)
+
+    # Case 2: raw_text fallback
+    if not dt_input and raw_text:
+        dt_input = raw_text
+
+    # Case 3: ALWAYS fallback to transcript
+    if not dt_input:
+        dt_input = normalized_transcript
+
+    print(f"[DT INPUT]: {dt_input}")
+
+    # --- Resolve datetime ---
+    try:
+        meeting_datetime = resolve_datetime(dt_input)
+        print(f"[RESOLVED DATETIME]: {meeting_datetime}")
+    except Exception as e:
+        print(f"Datetime resolution failed: {e}")
+        meeting_datetime = None
+
+    # Add event if exists
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
 
-        raw_date = clean_value(event.get("date") or event.get("due_date"))
-        raw_time = clean_value(event.get("time") or event.get("due_time"))
-        raw_text = clean_value(event.get("rawText") or event.get("raw_text"))
-
-        dt_input = None
-
-        # Case 1: structured values
-        if raw_date or raw_time:
-            parts = []
-            if raw_date:
-                parts.append(raw_date)
-            if raw_time:
-                parts.append(raw_time)
-            dt_input = " ".join(parts)
-
-        # Case 2: raw_text fallback
-        if not dt_input and raw_text:
-            dt_input = raw_text
-
-        # Case 3: FINAL fallback → transcript
-        if not dt_input:
-            dt_input = normalized_transcript
-
-        print(f"[DT INPUT]: {dt_input}")
-
-        # --- Resolve datetime with timezone ---
-        if dt_input:
-            try:
-                meeting_datetime = resolve_datetime(dt_input)
-                print(f"[RESOLVED DATETIME]: {meeting_datetime}")
-            except Exception as e:
-                print(f"Datetime resolution failed: {e}")
-                meeting_datetime = raw_date
-
-    # --- Add resolved datetime ---
+    # Add datetime if resolved
     if meeting_datetime:
-        sf_update_payload["meetingDateTime"] = resolve_datetime(meeting_datetime)
+        sf_update_payload["meetingDateTime"] = meeting_datetime
 
     # --- Send to Salesforce ---
     loop = asyncio.get_running_loop()
