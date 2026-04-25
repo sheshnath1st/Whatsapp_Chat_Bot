@@ -456,20 +456,28 @@ def safe_json_parse(response: str) -> dict | None:
 
     return None
 
-
 def extract_event_from_transcript(transcript: str) -> dict | None:
-    """Use LLM to extract calendar event details from an audio transcript."""
+    """Extract event with controlled date/time + validation."""
+
     if not transcript or not transcript.strip():
         return None
 
     system_prompt = (
-        "Extract any scheduled event or follow-up action from this transcript. "
-        "Return ONLY a JSON object with these fields:\n"
-        '{"type": "call|meeting|email|follow_up|null", '
-        '"date": "YYYY-MM-DD or relative description or null", '
-        '"time": "HH:MM or null", '
-        '"raw_text": "the relevant excerpt or null"}\n'
-        "If no event is mentioned, set all values to null."
+        "Extract event details from transcript.\n\n"
+        "Return ONLY JSON:\n"
+        '{'
+        '"type": "call|meeting|email|follow_up|null", '
+        '"date": "monday|after 2 days|YYYY-MM-DD|null", '
+        '"time": "2 pm|14:00|null", '
+        '"rawText": "exact phrase from transcript"'
+        '}\n\n'
+        "STRICT RULES:\n"
+        "- date MUST be ONE value only\n"
+        "- time MUST be ONE value only\n"
+        "- DO NOT include 'or', 'and', 'maybe', 'suggested'\n"
+        "- DO NOT include parentheses ()\n"
+        "- rawText MUST be exact part of transcript\n"
+        "- If unsure → return null\n"
     )
 
     try:
@@ -477,14 +485,51 @@ def extract_event_from_transcript(transcript: str) -> dict | None:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ])
+
         if not raw:
             return None
+
         parsed = safe_json_parse(raw)
-        return parsed if isinstance(parsed, dict) else None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        # 🔥 CLEANING FUNCTION
+        def clean(val):
+            if not val:
+                return None
+            val = str(val).strip().lower()
+
+            if val in ["null", "none", ""]:
+                return None
+
+            # ❌ reject bad values
+            if " or " in val:
+                return None
+            if "(" in val or ")" in val:
+                return None
+            if "suggested" in val:
+                return None
+
+            return val
+
+        event_type = clean(parsed.get("type"))
+        date = clean(parsed.get("date"))
+        time = clean(parsed.get("time"))
+
+        # 🔥 NEVER trust LLM rawText → use transcript
+        raw_text = transcript
+
+        return {
+            "type": event_type,
+            "date": date,
+            "time": time,
+            "raw_text": raw_text
+        }
+
     except Exception as exc:
         logger.warning("extract_event_from_transcript failed: %s", exc)
         return None
-
 
 def _call_text_llm(messages: list[dict]) -> str | None:
     """Call configured text LLM provider (Groq/OpenAI) with chat messages."""
