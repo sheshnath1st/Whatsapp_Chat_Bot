@@ -1,3 +1,22 @@
+from llm_prompts import CRM_ASSISTANT_PROMPT
+
+def resolve_meeting_datetime(event: dict) -> str | None:
+    """Given an event dict with normalized date/time fields, return ISO 8601 meetingDateTime or None."""
+    if not event or not isinstance(event, dict):
+        return None
+    raw_date = event.get("date") or event.get("due_date")
+    raw_time = event.get("time") or event.get("due_time")
+    raw_text = event.get("rawText") or event.get("raw_text") or raw_date
+    meeting_datetime = None
+    if raw_date:
+        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
+        meeting_datetime = resolve_datetime(dt_input)
+        if not meeting_datetime:
+            dt_input = f"{raw_date} 10:00"
+            meeting_datetime = resolve_datetime(dt_input)
+        if not meeting_datetime:
+            meeting_datetime = resolve_datetime(raw_date)
+    return meeting_datetime
 import re
 from datetime import datetime, timedelta
 
@@ -704,12 +723,20 @@ async def _handle_audio_event_flow(
     incoming_message_id: str,
     sf_context: dict,
 ):
-    """Flow 1 step 6-9: User sent audio reply to a card scan. Transcribe, extract event, update SF."""
+    """
+    Flow 1: Audio reply to business card scan.
+    Steps:
+    1. Transcribe audio (via LLM endpoint)
+    2. Extract event from transcript (via LLM)
+    3. Update Salesforce with transcript, event, and correct SF-ID
+    4. Persist all context and log events robustly
+    """
     sf_id = sf_context["sf_id"]
     headers = {"accept": "application/json", "Content-Type": "application/json"}
     json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
 
     print(f"[Flow1] Audio follow-up for SF record {sf_id}")
+    # Step 1: Transcribe audio and extract event
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{AGENT_URL}/llm-response",
@@ -728,8 +755,7 @@ async def _handle_audio_event_flow(
     transcript = result.get("transcript", "")
     event = result.get("event") or {}
 
-
-    # --- Backend: resolve ISO datetime from LLM event extraction ---
+    # Step 2: Prepare Salesforce update payload (always include all required fields)
     sf_update_payload = {"transcript": normalize_numbers(transcript)}
     if isinstance(event, dict) and any(event.values()):
         sf_update_payload["event"] = event
@@ -737,18 +763,19 @@ async def _handle_audio_event_flow(
         raw_date = event.get("date") or event.get("due_date")
         raw_time = event.get("time") or event.get("due_time")
         raw_text = event.get("rawText") or event.get("raw_text") or raw_date
-        # Combine date and time if both present, else use raw_text
         dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
         meeting_datetime = resolve_datetime(dt_input)
         if meeting_datetime:
             sf_update_payload["meetingDateTime"] = get_next_weekday(meeting_datetime)
+    # Always ensure all required keys are present
+    for key in ["transcript", "event", "meetingDateTime"]:
+        sf_update_payload.setdefault(key, None)
 
+    # Step 3: Update Salesforce
     loop = asyncio.get_running_loop()
     sf_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, sf_update_payload)
 
-    # clear_pending_sf_context(user_phone)
-
-    # Save transcript + event to MongoDB contacts collection (Flow 1 follow-up)
+    # Step 4: Persist context and log
     update_contact_event(
         phone=user_phone,
         sf_id=sf_id,
@@ -756,7 +783,6 @@ async def _handle_audio_event_flow(
         event=event if isinstance(event, dict) and any(event.values()) else None,
     )
 
-    # Save audio message to conversation thread
     audio_doc = _build_audio_message_doc(
         message_id=incoming_message_id,
         media_id=media_id,
@@ -775,7 +801,7 @@ async def _handle_audio_event_flow(
         last_event_date=event_date,
     )
 
-
+    # Step 5: Build user-facing reply
     event_summary = ""
     meeting_datetime = get_next_weekday(sf_update_payload.get("meetingDateTime"))
     if isinstance(event, dict):
@@ -1046,24 +1072,9 @@ async def llm_reply_to_text_v2(
                 salesforce_payload = _to_salesforce_payload(message_content)
                 # --- Ensure meetingDateTime is always resolved and set if event date is present ---
                 event = message_content.get("event") if isinstance(message_content.get("event"), dict) else None
-                if event:
-                    raw_date = event.get("date") or event.get("due_date")
-                    raw_time = event.get("time") or event.get("due_time")
-                    raw_text = event.get("rawText") or event.get("raw_text") or raw_date
-                    meeting_datetime = None
-                    # Try resolving with both date and time
-                    if raw_date:
-                        dt_input = f"{raw_date or ''} {raw_time or ''}".strip() or raw_text
-                        meeting_datetime = resolve_datetime(dt_input)
-                        # If failed, try with default time
-                        if not meeting_datetime:
-                            dt_input = f"{raw_date} 10:00"
-                            meeting_datetime = resolve_datetime(dt_input)
-                        # As a last fallback, try just the date string (for weekday names)
-                        if not meeting_datetime:
-                            meeting_datetime = resolve_datetime(raw_date)
-                        if meeting_datetime:
-                            salesforce_payload["meetingDateTime"] = meeting_datetime
+                meeting_datetime = resolve_meeting_datetime(event)
+                if meeting_datetime:
+                    salesforce_payload["meetingDateTime"] = meeting_datetime
                 message_content_str = _format_extraction_reply(message_content, kind)
             else:
                 message_content_str = message_content

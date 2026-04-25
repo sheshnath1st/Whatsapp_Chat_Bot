@@ -77,6 +77,8 @@ def _process_incoming_messages(
     for message in messages:
         user_phone = message.get("from")
         incoming_message_id = message.get("id")
+        if not incoming_message_id:
+            continue
         context_message_id = ((message or {}).get("context") or {}).get("id") or ""
         user_message, media_id, kind = _extract_user_message(message)
 
