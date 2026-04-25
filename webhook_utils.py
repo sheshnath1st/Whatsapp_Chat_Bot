@@ -492,6 +492,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         if 200 <= response.status_code < 300:
             return {
                 "ok": True,
+                "sf_payload": payload,
                 "status_code": response.status_code,
                 "response": response_body,
                 "salesforce_id": sf_id
@@ -499,6 +500,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
 
         return {
             "ok": False,
+            "sf_payload": payload,
             "status_code": response.status_code,
             "error": "salesforce_api_error",
             "response": response_body,
@@ -507,7 +509,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
 
     except Exception as exc:
         print(f"Error updating Salesforce: {exc}")
-        return {"ok": False, "error": str(exc), "salesforce_id": sf_id}
+        return {"ok": False, "error": str(exc), "salesforce_id": sf_id, "sf_payload": payload}
     
 def _salesforce_status_message(salesforce_result: Optional[dict]) -> str:
     """Always include SF ID in the status string so it reaches the WhatsApp reply."""
@@ -836,7 +838,7 @@ async def _handle_audio_event_flow(
         f"Transcript: {normalized_transcript}"
         f"{event_summary}\n\n"
         f"{sf_status}"
-    )
+)
 
     # --- Send reply ---
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
