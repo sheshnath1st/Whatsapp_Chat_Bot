@@ -439,6 +439,9 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             raw_date = event.get("date") or event.get("due_date")
             raw_time = event.get("time") or event.get("due_time")
             raw_text = event.get("rawText") or event.get("raw_text")
+            raw_text_transcript = event.get("transcript") or event.get("transcript")
+            
+            print(f"Raw event data for datetime resolution: date='{raw_date}', time='{raw_time}', text='{raw_text}'")
 
             # ✅ Build clean input
             dt_parts = []
@@ -452,7 +455,10 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
             dt_input = " ".join(dt_parts).strip()
 
             if not dt_input:
-                dt_input = raw_text
+                if(raw_text):
+                    dt_input = raw_text
+                elif raw_text_transcript:
+                    dt_input = raw_text_transcript
 
             # ✅ Resolve datetime
             if dt_input:
