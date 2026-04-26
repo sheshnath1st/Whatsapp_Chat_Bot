@@ -811,10 +811,12 @@ async def _handle_audio_event_flow(
 
     if response.status_code != 200:
         print(f"[Flow1] audio_event endpoint error: {response.status_code}")
-        await send_message_async(
+        result = await send_message_async(
             user_phone,
             "Could not process your voice message. Please try again."
         )
+        if result.get("message_id"):
+            store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
         return
 
     response_data = response.json()
@@ -1020,6 +1022,7 @@ async def _handle_audio_event_flow(
             "sf_result": sf_result,
         },
     )
+    store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
     # --- Clear context ---
     # clear_pending_sf_context(user_phone)
     store_pending_sf_context(user_phone, sf_id, {})
@@ -1434,7 +1437,9 @@ async def llm_reply_to_text_v2(
                     related_message_id=incoming_message_id,
                     payload={"llm_response": response_data},
                 )
-                await send_message_async(user_phone, "Received empty response from LLM API.")
+                result = await send_message_async(user_phone, "Received empty response from LLM API.")
+                print("Send result for empty response notification:", result)
+                # store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
         else:
             print("Error: Invalid LLM API response", response_data)
             log_failure(
