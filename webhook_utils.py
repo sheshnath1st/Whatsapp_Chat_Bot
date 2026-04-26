@@ -1,3 +1,95 @@
+def extract_crm_structured_data(input_data: dict) -> dict:
+    """
+    Extracts structured CRM data from input dict according to strict rules.
+    Input dict should have keys:
+        - 'user_input': str (raw user message)
+        - 'context': dict with optional 'lead_id', 's3_url'
+    Returns dict with keys:
+        full_name, phone, email, company, designation, intent, action, date, time, datetime_iso, lead_id, s3_url
+    """
+    import re
+    from datetime import datetime
+
+    # Helper: extract with regex
+    def extract(pattern, text):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    user_input = input_data.get("user_input", "") or ""
+    context = input_data.get("context", {}) or {}
+    lead_id = context.get("lead_id", "") or ""
+    s3_url = context.get("s3_url", "") or ""
+
+    # Contact extraction
+    full_name = extract(r"(?:name|full name)[:\-\s]*([A-Za-z .']{2,})", user_input)
+    phone = extract(r"(?:phone|mobile|contact)[:\-\s]*([+\d][\d\s\-]{7,})", user_input)
+    email = extract(r"([\w\.-]+@[\w\.-]+)", user_input)
+    company = extract(r"(?:company|organization|org)[:\-\s]*([A-Za-z0-9 .,&'-]{2,})", user_input)
+    designation = extract(r"(?:designation|title|position)[:\-\s]*([A-Za-z .'-]{2,})", user_input)
+
+    # Intent detection
+    intent = ""
+    action = ""
+    lowered = user_input.lower()
+    if lead_id and ("change" in lowered or "reschedule" in lowered or "update" in lowered):
+        intent = "update_meeting"
+        action = "update_meeting"
+    elif any(word in lowered for word in ["schedule", "set meeting"]):
+        intent = "schedule_meeting"
+        action = "schedule_meeting"
+    elif any(word in lowered for word in ["call", "remind"]):
+        intent = "follow_up"
+        action = "follow_up"
+    elif not lead_id:
+        intent = "create_lead"
+        action = "create_lead"
+
+    # Date/time extraction
+    date = extract(r"(?:on|for|date)[:\-\s]*([\w\d\s]+)", user_input)
+    time = extract(r"(?:at|time)[:\-\s]*([\d:apm\s]+)", user_input)
+    datetime_iso = ""
+    # Try to resolve to ISO
+    try:
+        from dateutil import parser as date_parser
+        dt_str = f"{date} {time}".strip()
+        if dt_str:
+            dt = date_parser.parse(dt_str, fuzzy=True)
+            datetime_iso = dt.isoformat()
+    except Exception:
+        datetime_iso = ""
+
+    # If lead_id in context, always include it
+    # If s3_url in context, always include it
+    # If input contains media reference, map to s3_url (simple heuristic)
+    if not s3_url and re.search(r"s3://|https?://[\w\.-]+/.*\.(jpg|jpeg|png|mp3|wav|pdf)", user_input, re.IGNORECASE):
+        s3_url = extract(r"(s3://[\w\-/\.]+|https?://[\w\.-]+/[^\s]+\.(?:jpg|jpeg|png|mp3|wav|pdf))", user_input)
+
+    # Never remove existing lead_id or s3_url
+    # Never create new lead if lead_id exists
+    if lead_id and intent == "create_lead":
+        intent = "update_meeting"
+        action = "update_meeting"
+
+    # Build output
+    result = {
+        "full_name": full_name,
+        "phone": phone,
+        "email": email,
+        "company": company,
+        "designation": designation,
+        "intent": intent,
+        "action": action,
+        "date": date,
+        "time": time,
+        "datetime_iso": datetime_iso,
+        "lead_id": lead_id,
+        "s3_url": s3_url,
+    }
+    # Fill missing with ""
+    for k in result:
+        if result[k] is None:
+            result[k] = ""
+    return result
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -331,7 +423,7 @@ def send_message(to: str, text: str):
 
 async def send_message_async(user_phone: str, message: str):
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, send_message, user_phone, message)
+    return await loop.run_in_executor(None, send_message, user_phone, message)
 
 
 
@@ -1170,6 +1262,7 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content_str}")
                 send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str)
+                message_id = (send_result or {}).get("message_id")
                 if not (send_result or {}).get("ok"):
                     log_failure(
                         source="llm_reply_to_text_v2.send_message_failed",
@@ -1182,7 +1275,7 @@ async def llm_reply_to_text_v2(
                     event_type="outgoing_message",
                     direction="outgoing",
                     phone=user_phone,
-                    message_id=(send_result or {}).get("message_id"),
+                    message_id=message_id,
                     related_message_id=incoming_message_id,
                     payload={
                         "kind": kind or "text",
@@ -1192,6 +1285,14 @@ async def llm_reply_to_text_v2(
                         "salesforce_result": salesforce_result,
                         "whatsapp_send_result": send_result,
                     },
+                )
+                # Save the message_id as the last backend message for reply tracking
+                update_conversation_sf_and_context(user_phone, last_intent=None, last_event_date=None)
+                # Also store the message_id as 'last_bot_message_id' in conversation context
+                from conversation_store import _get_conversations_collection
+                _get_conversations_collection().update_one(
+                    {"_id": f"conv_{user_phone}"},
+                    {"$set": {"context.last_bot_message_id": message_id}},
                 )
 
                 if salesforce_result:
