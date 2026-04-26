@@ -1441,6 +1441,7 @@ async def llm_reply_to_text_v2(
                 result = await send_message_async(user_phone, "Received empty response from LLM API.")
                 print("Send result for empty response notification:", result)
                 # store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
+            clear_pending_sf_context(user_phone)
         else:
             print("Error: Invalid LLM API response", response_data)
             log_failure(
@@ -1451,7 +1452,7 @@ async def llm_reply_to_text_v2(
                 payload={"status_code": response.status_code, "response_data": response_data},
             )
             await send_message_async(user_phone, "Failed to process message due to an internal server error.")
-
+            
     except Exception as e:
         print("LLM error:", e)
         log_failure(
