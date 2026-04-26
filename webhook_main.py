@@ -243,6 +243,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
     try:
         print("Received webhook data:")
+        print(json.dumps(data, indent=2))
         message_data = WhatsAppMessage(**data)
 
         if not message_data.entry:
@@ -260,7 +261,6 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 if _is_ignored_phone(incoming_phone_id) or change.get("messages") is None:
                     print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
                     continue
-                print(json.dumps(data, indent=2))
                 handled_statuses += _log_status_events(change, incoming_phone_id)
                 handled_messages += _process_incoming_messages(
                     change=change,
