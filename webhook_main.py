@@ -81,6 +81,7 @@ def _process_incoming_messages(
     messages = change.get("messages") or []
     print(f"Processing {len(messages)} incoming messages...")
     from conversation_store import _get_conversations_collection
+    from conversation_store import find_sf_id_by_context_id
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
@@ -96,16 +97,10 @@ def _process_incoming_messages(
         reply_to = message.get("context", {}).get("id") or ""
         print(f"Reply_to: {reply_to}")
 
-        # 3. Match reply_to with last_bot_message_id in DB
-        conv_coll = _get_conversations_collection()
-        conv_doc = conv_coll.find_one({"_id": f"conv_{user_phone}"}) or {}
-        last_bot_message_id = conv_doc.get("context", {}).get("last_bot_message_id")
-        last_sf_id = conv_doc.get("context", {}).get("last_sf_id")
-        print(f"last_bot_message_id: {last_bot_message_id}, last_sf_id: {last_sf_id}")
-        if reply_to and reply_to == last_bot_message_id:
-            sf_id = last_sf_id
-        else:
-            sf_id = None
+        # 3. Match reply_to (context.id) to previous message_id in conversation
+        sf_id = None
+        if reply_to:
+            sf_id = find_sf_id_by_context_id(user_phone, reply_to)
         print(f"Mapped sf_id for this message: {sf_id}")
 
         s3_url = ""

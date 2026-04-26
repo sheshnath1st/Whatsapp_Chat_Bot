@@ -249,6 +249,10 @@ def upsert_conversation_message(phone: str, message_doc: dict) -> None:
     message_doc must include at minimum: message_id, type, timestamp.
     """
     now = _utc_now_iso()
+    # Patch: Save context_id if present in message_doc
+    context_id = message_doc.get("context_id")
+    if context_id:
+        message_doc["context_id"] = context_id
     with _LOCK:
         try:
             _get_conversations_collection().update_one(
@@ -268,6 +272,25 @@ def upsert_conversation_message(phone: str, message_doc: dict) -> None:
             print(f"[MongoDB] conversation message saved for phone={phone} type={message_doc.get('type')}")
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB upsert_conversation_message failed: {exc}")
+
+
+def find_sf_id_by_context_id(phone: str, context_id: str) -> Optional[str]:
+    """
+    Search the conversation messages for a message with message_id == context_id and return its sf_id if present.
+    """
+    conv = get_conversation(phone)
+    if not conv:
+        return None
+    messages = conv.get("messages") or []
+    for msg in messages:
+        if msg.get("message_id") == context_id:
+            # Try to get sf_id from message or its salesforce field
+            sf_id = msg.get("sf_id")
+            if not sf_id:
+                sf = (msg.get("salesforce") or {}).get("response") or {}
+                sf_id = sf.get("sf_id") or sf.get("salesforce_id")
+            return sf_id
+    return None
 
 
 def update_conversation_sf_and_context(
@@ -296,11 +319,22 @@ def update_conversation_sf_and_context(
             print(f"MongoDB update_conversation_sf_and_context failed: {exc}")
 
 
-def get_conversation(phone: str) -> Optional[dict]:
-    """Return the full conversation document for a phone number, or None."""
+
+def get_conversation(phone: str, wa_id: str = None, user_id: str = None) -> Optional[dict]:
+    """
+    Return the full conversation document for a user. Prefer WhatsApp wa_id or user_id for uniqueness.
+    If wa_id or user_id is provided, use it as the unique key. Fallback to phone if not.
+    """
+    # Prefer user_id, then wa_id, then phone for unique conversation key
+    if user_id:
+        conv_key = f"conv_{user_id}"
+    elif wa_id:
+        conv_key = f"conv_{wa_id}"
+    else:
+        conv_key = f"conv_{phone}"
     with _LOCK:
         try:
-            return _get_conversations_collection().find_one({"_id": f"conv_{phone}"})
+            return _get_conversations_collection().find_one({"_id": conv_key})
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB get_conversation failed: {exc}")
             return None

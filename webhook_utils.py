@@ -836,9 +836,12 @@ async def _handle_audio_event_flow(
 
     # --- Prepare Salesforce payload ---
     sf_update_payload = {
-        "transcript": normalized_transcript,
-        "s3_url": sf_context.get("s3_url") or ""
+        "transcript": normalized_transcript
     }
+    # Always include s3_url if available in sf_context
+    s3_url = sf_context.get("s3_url")
+    if s3_url:
+        sf_update_payload["s3_url"] = s3_url
     meeting_datetime = None
 
     def clean_value(val):
