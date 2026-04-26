@@ -75,23 +75,32 @@ def _process_incoming_messages(
     import asyncio
     handled_messages = 0
     messages = change.get("messages") or []
-    for message in messages:
+    print(f"Processing {len(messages)} incoming messages...")
+    for idx, message in enumerate(messages):
+        print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
+        print(f"User phone: {user_phone}")
         incoming_message_id = message.get("id")
+        print(f"Incoming message ID: {incoming_message_id}")
         user_message, media_id, kind = _extract_user_message(message)
+        print(f"Extracted user_message: {user_message}")
+        print(f"Extracted media_id: {media_id}")
+        print(f"Detected kind: {kind}")
 
         s3_url = ""
         s3_detail = None
         if kind in {"audio", "image"} and media_id:
-            # Synchronously upload to S3 so we have the URL for Salesforce
+            print(f"Uploading media to S3: media_id={media_id}, kind={kind}")
             s3_detail = upload_whatsapp_media_to_s3(
                 media_id,
                 kind,
                 incoming_message_id,
                 user_phone,
             )
+            print(f"S3 upload result: {s3_detail}")
             if s3_detail and s3_detail.get("bucket") and s3_detail.get("key"):
                 s3_url = f"s3://{s3_detail['bucket']}/{s3_detail['key']}"
+                print(f"S3 URL: {s3_url}")
 
         handled_messages += 1
         payload = {
@@ -103,6 +112,7 @@ def _process_incoming_messages(
         }
         if s3_detail:
             payload["s3_detail"] = s3_detail
+        print(f"Logging incoming message event: {payload}")
         log_event(
             event_type="incoming_message",
             direction="incoming",
@@ -113,6 +123,7 @@ def _process_incoming_messages(
 
         # Pass s3_url in context to llm_reply_to_text_v2
         context = {"s3_url": s3_url}
+        print(f"Adding background task: llm_reply_to_text_v2 with context: {context}")
         background_tasks.add_task(
             llm_reply_to_text_v2,
             user_message,
@@ -122,6 +133,7 @@ def _process_incoming_messages(
             incoming_message_id,
             context,
         )
+    print(f"Total handled messages: {handled_messages}")
     return handled_messages
 
 

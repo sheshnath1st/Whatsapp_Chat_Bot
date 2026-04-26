@@ -1,3 +1,24 @@
+def sanitize_llm_response(data):
+    """
+    Recursively replace None with '' for strings and {} for dicts in LLM response.
+    """
+    if isinstance(data, dict):
+        sanitized = {}
+        for k, v in data.items():
+            if v is None:
+                # Use empty dict for event, metadata, contact, else empty string
+                if k in {"event", "metadata", "contact"}:
+                    sanitized[k] = {} if k != "metadata" else {"confidence_score": 0.0}
+                else:
+                    sanitized[k] = ""
+            else:
+                sanitized[k] = sanitize_llm_response(v)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_llm_response(item) for item in data]
+    else:
+        return data
+    
 def extract_crm_structured_data(input_data: dict) -> dict:
     """
     Extracts structured CRM data from input dict according to strict rules.
@@ -1117,6 +1138,9 @@ async def llm_reply_to_text_v2(
 
         response_data = response.json()
         print("LLM API response:", response_data, "of type", type(user_phone))
+        # Sanitize LLM response to prevent NoneType errors
+        if isinstance(response_data, dict) and "response" in response_data:
+            response_data["response"] = sanitize_llm_response(response_data["response"])
 
         # --- If incoming_message_id and conversation_id are present, fetch transcript/event using LLM ---
         # (Assume conversation_id is passed as an argument or can be extracted from webhook payload if needed)
@@ -1182,13 +1206,13 @@ async def llm_reply_to_text_v2(
                     update_payload["transcript"] = user_input
                 # Optionally, merge in more fields if needed
                 loop = asyncio.get_running_loop()
-                update_payload["s3_url"] = sf_context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
+                update_payload["s3_url"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
             elif salesforce_payload:
                 # Fallback: create new if no sf_id
                 loop = asyncio.get_running_loop()
-                salesforce_payload["s3_url_reply"] = sf_context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
+                salesforce_payload["s3_url_reply"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
