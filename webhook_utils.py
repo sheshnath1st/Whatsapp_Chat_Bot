@@ -788,7 +788,13 @@ async def _handle_audio_event_flow(
 ):
     """Flow: Audio → Transcription → Event extraction → Salesforce update"""
 
-    sf_id = sf_context["sf_id"]
+    from conversation_store import get_sf_id_by_message_id, store_sf_message_link
+    reply_id = sf_context.get("reply_id")
+    sf_id = None
+    if reply_id:
+        sf_id = get_sf_id_by_message_id(reply_id)
+    if not sf_id:
+        sf_id = sf_context.get("sf_id")
     headers = {"accept": "application/json", "Content-Type": "application/json"}
     json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
 
@@ -897,12 +903,27 @@ async def _handle_audio_event_flow(
 
     # --- Send to Salesforce ---
     loop = asyncio.get_running_loop()
-    sf_result = await loop.run_in_executor(
-        None,
-        send_to_salesforce_update,
-        sf_id,
-        sf_update_payload
-    )
+    sf_result = None
+    if sf_id:
+        sf_result = await loop.run_in_executor(
+            None,
+            send_to_salesforce_update,
+            sf_id,
+            sf_update_payload
+        )
+        # Store mapping for future replies
+        if sf_result and sf_result.get("ok"):
+            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+    else:
+        # No sf_id found, create new lead
+        sf_result = await loop.run_in_executor(
+            None,
+            send_to_salesforce,
+            sf_update_payload
+        )
+        sf_id = (sf_result or {}).get("salesforce_id")
+        if sf_id:
+            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
 
     # --- Save to MongoDB ---
     update_contact_event(
