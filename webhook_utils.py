@@ -941,6 +941,7 @@ async def llm_reply_to_text_v2(
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
         if kind == "audio" and media_id:
             sf_context = get_pending_sf_context(user_phone) or {}
+            sf_context["sf_id"] = ""
             # Prefer sf_id from context if available
             if context and context.get("sf_id"):
                 sf_context["sf_id"] = context.get("sf_id")
