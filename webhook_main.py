@@ -72,6 +72,7 @@ def _process_incoming_messages(
     incoming_phone_id: Optional[str],
     background_tasks: BackgroundTasks,
 ) -> int:
+    import asyncio
     handled_messages = 0
     messages = change.get("messages") or []
     for message in messages:
@@ -79,11 +80,26 @@ def _process_incoming_messages(
         incoming_message_id = message.get("id")
         user_message, media_id, kind = _extract_user_message(message)
 
+        s3_url = ""
+        s3_detail = None
+        if kind in {"audio", "image"} and media_id:
+            # Synchronously upload to S3 so we have the URL for Salesforce
+            s3_detail = upload_whatsapp_media_to_s3(
+                media_id,
+                kind,
+                incoming_message_id,
+                user_phone,
+            )
+            if s3_detail and s3_detail.get("bucket") and s3_detail.get("key"):
+                s3_url = f"s3://{s3_detail['bucket']}/{s3_detail['key']}"
+
+        handled_messages += 1
         log_event(
             event_type="incoming_message",
             direction="incoming",
             phone=user_phone,
             message_id=incoming_message_id,
+            s3_detail=s3_detail,
             payload={
                 "kind": kind or "text",
                 "text": user_message,
@@ -93,6 +109,8 @@ def _process_incoming_messages(
             },
         )
 
+        # Pass s3_url in context to llm_reply_to_text_v2
+        context = {"s3_url": s3_url}
         background_tasks.add_task(
             llm_reply_to_text_v2,
             user_message,
@@ -100,16 +118,8 @@ def _process_incoming_messages(
             media_id,
             kind,
             incoming_message_id,
+            context,
         )
-        if kind in {"audio", "image"} and media_id:
-            background_tasks.add_task(
-                upload_whatsapp_media_to_s3,
-                media_id,
-                kind,
-                incoming_message_id,
-                user_phone,
-            )
-        handled_messages += 1
     return handled_messages
 
 
