@@ -94,19 +94,21 @@ def _process_incoming_messages(
                 s3_url = f"s3://{s3_detail['bucket']}/{s3_detail['key']}"
 
         handled_messages += 1
+        payload = {
+            "kind": kind or "text",
+            "text": user_message,
+            "media_id": media_id,
+            "phone_number_id": incoming_phone_id,
+            "raw_message": message,
+        }
+        if s3_detail:
+            payload["s3_detail"] = s3_detail
         log_event(
             event_type="incoming_message",
             direction="incoming",
             phone=user_phone,
             message_id=incoming_message_id,
-            s3_detail=s3_detail,
-            payload={
-                "kind": kind or "text",
-                "text": user_message,
-                "media_id": media_id,
-                "phone_number_id": incoming_phone_id,
-                "raw_message": message,
-            },
+            payload=payload,
         )
 
         # Pass s3_url in context to llm_reply_to_text_v2
