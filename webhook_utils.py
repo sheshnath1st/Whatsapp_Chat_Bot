@@ -1257,14 +1257,15 @@ async def llm_reply_to_text_v2(
             elif salesforce_payload and not sf_id:
                 # Fallback: create new if no sf_id
                 print("[BLOCKED CREATE] No SF ID found, skipping lead creation")
-                loop = asyncio.get_running_loop()
-                store_sf_message_link(sf_id, incoming_message_id, salesforce_payload)   
+                loop = asyncio.get_running_loop() 
                 salesforce_payload["s3_url_reply"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
                     print(f"[NEW SF RECORD] Created new Salesforce record with ID: {sf_id}")
                     salesforce_payload["salesforce_id"] = sf_id
+                    salesforce_payload["sf_id"] = sf_id
+                    store_sf_message_link(sf_id, incoming_message_id, salesforce_payload)  
                 sf_status = _salesforce_status_message(salesforce_result)
             else:
                 sf_status = None
