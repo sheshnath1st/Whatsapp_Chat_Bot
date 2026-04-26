@@ -106,8 +106,7 @@ def extract_crm_structured_data(input_data: dict) -> dict:
         if result[k] is None:
             result[k] = ""
     return result
-import re
-from datetime import datetime, timedelta, timezone
+
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 MONTHS = {
@@ -125,106 +124,6 @@ def normalize_numbers(text: str) -> str:
     return text
 
 
-def resolve_datetime(text: str) -> str:
-    if not text:
-        return text
-    if re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", text):
-        return text
-    text = normalize_numbers(text.lower())
-    now = datetime.now(timezone.utc)
-    base_date = None
-
-    # --- RELATIVE ---
-    if "day after tomorrow" in text:
-        base_date = now + timedelta(days=2)
-    elif "tomorrow" in text:
-        base_date = now + timedelta(days=1)
-    elif "today" in text:
-        base_date = now
-    elif m := re.search(r"after (\d+) days", text):
-        base_date = now + timedelta(days=int(m.group(1)))
-    elif m := re.search(r"in (\d+) days", text):
-        base_date = now + timedelta(days=int(m.group(1)))
-    elif "next week" in text:
-        base_date = now + timedelta(days=7)
-    elif m := re.search(r"(\d+) day", text):
-        base_date = now + timedelta(days=int(m.group(1)))
-    elif m := re.search(r"(\d+) days", text):
-        base_date = now + timedelta(days=int(m.group(1)))
-
-
-    # --- DATE (26th) ---
-    elif m := re.search(r"\b(\d{1,2})(st|nd|rd|th)\b", text):
-        day = int(m.group(1))
-        try:
-            base_date = now.replace(day=day)
-            if base_date < now:
-                month = now.month + 1 if now.month < 12 else 1
-                year = now.year if now.month < 12 else now.year + 1
-                base_date = base_date.replace(year=year, month=month)
-        except:
-            base_date = None
-
-    # --- DATE (26 April) ---
-    elif m := re.search(r"(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)", text):
-        day = int(m.group(1))
-        month = MONTHS[m.group(2)]
-        year = now.year
-
-        try:
-            base_date = datetime(year, month, day)
-            if base_date < now:
-                base_date = datetime(year + 1, month, day)
-        except:
-            base_date = None
-
-    # --- WEEKDAY ---
-    else:
-        for wd in WEEKDAYS:
-            if re.search(rf"\b(this\s+|next\s+|on\s+|after\s+)?{wd}\b", text):
-                today_idx = now.weekday()
-                target_idx = WEEKDAYS.index(wd)
-                days_ahead = (target_idx - today_idx + 7) % 7
-                days_ahead = days_ahead or 7
-                base_date = now + timedelta(days=days_ahead)
-                break
-
-    if not base_date:
-        return None
-
-    # --- TIME ---
-    hour, minute = 10, 0
-
-    # exact time
-    if m := re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text):
-        hour = int(m.group(1))
-        minute = int(m.group(2) or 0)
-        if m.group(3) == "pm" and hour != 12:
-            hour += 12
-        if m.group(3) == "am" and hour == 12:
-            hour = 0
-
-    # 24h format
-    elif m := re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text):
-        hour = int(m.group(1))
-        minute = int(m.group(2))
-
-    # single number (e.g. "meeting at 5")
-    elif m := re.search(r"\bat (\d{1,2})\b", text):
-        hour = int(m.group(1))
-
-    # time words
-    elif "morning" in text:
-        hour = 10
-    elif "afternoon" in text:
-        hour = 14
-    elif "evening" in text:
-        hour = 18
-    elif "night" in text:
-        hour = 21
-
-    dt = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 import os
 import re
@@ -234,6 +133,7 @@ import json
 import requests
 import httpx
 from datetime import datetime, timezone
+
 from dotenv import load_dotenv
 from typing import Optional
 from conversation_store import (
@@ -247,9 +147,10 @@ from conversation_store import (
     upsert_conversation_message,
     update_conversation_sf_and_context,
     get_recent_messages,
-    store_sf_message_link,
-    get_sf_id_by_message_id,
 )
+
+# Import helpers
+from utils_helper import resolve_datetime, clean_value, build_salesforce_payload, store_reply_mapping, fetch_sf_id_by_message_id, normalize_numbers
 
 load_dotenv()
 
@@ -391,7 +292,8 @@ def _send_message_once(payload: dict, headers: dict) -> dict:
         "message_id": _extract_whatsapp_message_id(response_json),
     }
 
-def send_message(to: str, text: str):
+
+def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dict = None):
     print(f"Preparing to send message to {to}: {text}")
     if not text:
         print("Error: Message text is empty.")
@@ -423,6 +325,10 @@ def send_message(to: str, text: str):
             send_attempt = _send_message_once(payload, headers)
             if send_attempt["status_code"] == 200:
                 print("Message sent successfully:", send_attempt)
+                # Store mapping if sf_id and payload_for_mapping are provided
+                if sf_id and payload_for_mapping:
+                    from utils_helper import store_reply_mapping
+                    store_reply_mapping(sf_id, send_attempt["message_id"], payload_for_mapping)
                 return {
                     "ok": True,
                     "status_code": send_attempt["status_code"],
@@ -732,7 +638,7 @@ def _format_extraction_reply(data: dict, kind: Optional[str]) -> str:
     return "\n".join(lines) if lines else json.dumps(data, ensure_ascii=False)
 
 
-def send_audio_message(to: str, file_path: str):
+def send_audio_message(to: str, file_path: str, sf_id: str = None, payload_for_mapping: dict = None):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/media"
     with open(file_path, "rb") as file_handle:
         files = {"file": ("reply.mp3", file_handle, "audio/mpeg")}
@@ -761,10 +667,15 @@ def send_audio_message(to: str, file_path: str):
             send_json = send_resp.json()
         except Exception:
             pass
+        message_id = _extract_whatsapp_message_id(send_json)
+        # Store mapping if sf_id and payload_for_mapping are provided
+        if sf_id and payload_for_mapping and send_resp.status_code == 200:
+            from utils_helper import store_reply_mapping
+            store_reply_mapping(sf_id, message_id, payload_for_mapping)
         return {
             "ok": send_resp.status_code == 200,
             "status_code": send_resp.status_code,
-            "message_id": _extract_whatsapp_message_id(send_json),
+            "message_id": message_id,
             "response": send_json,
         }
     else:
@@ -788,11 +699,10 @@ async def _handle_audio_event_flow(
 ):
     """Flow: Audio → Transcription → Event extraction → Salesforce update"""
 
-    from conversation_store import get_sf_id_by_message_id, store_sf_message_link
     reply_id = sf_context.get("reply_id")
     sf_id = None
     if reply_id:
-        sf_id = get_sf_id_by_message_id(reply_id)
+        sf_id = fetch_sf_id_by_message_id(reply_id)
     if not sf_id:
         sf_id = sf_context.get("sf_id")
     headers = {"accept": "application/json", "Content-Type": "application/json"}
@@ -816,7 +726,7 @@ async def _handle_audio_event_flow(
             "Could not process your voice message. Please try again."
         )
         if result.get("message_id"):
-            store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
+            store_reply_mapping(sf_id, result["message_id"], sf_update_payload)
         return
 
     response_data = response.json()
@@ -854,13 +764,6 @@ async def _handle_audio_event_flow(
         sf_update_payload["s3_url"] = s3_url
     meeting_datetime = None
 
-    def clean_value(val):
-        if not val:
-            return None
-        val = str(val).strip().lower()
-        if val in ["null", "none", ""]:
-            return None
-        return val
 
     # Always process datetime, even if event is empty
     raw_date = clean_value((event or {}).get("date") or (event or {}).get("due_date"))
@@ -876,11 +779,9 @@ async def _handle_audio_event_flow(
         if raw_time:
             parts.append(raw_time)
         dt_input = " ".join(parts)
-
     # Case 2: raw_text fallback
     if not dt_input and raw_text:
         dt_input = raw_text
-
     # Case 3: ALWAYS fallback to transcript
     if not dt_input:
         dt_input = normalized_transcript
@@ -915,7 +816,7 @@ async def _handle_audio_event_flow(
         )
         # Store mapping for future replies
         if sf_result and sf_result.get("ok"):
-            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+            store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
     else:
         # No sf_id found, create new lead
         sf_result = await loop.run_in_executor(
@@ -925,7 +826,7 @@ async def _handle_audio_event_flow(
         )
         sf_id = (sf_result or {}).get("salesforce_id")
         if sf_id:
-            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+            store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
 
     # --- Save to MongoDB ---
     update_contact_event(
@@ -993,7 +894,7 @@ async def _handle_audio_event_flow(
     )
 
     # --- Send reply ---
-    send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
+    send_result = await loop.run_in_executor(None, send_message, user_phone, reply, sf_id, sf_update_payload)
     print("Message sent successfully on handle audio:", send_result)
     # --- Logging ---
     log_event(
@@ -1022,7 +923,7 @@ async def _handle_audio_event_flow(
             "sf_result": sf_result,
         },
     )
-    store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+    store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
     # --- Clear context ---
     # clear_pending_sf_context(user_phone)
     store_pending_sf_context(user_phone, sf_id, {})
@@ -1172,7 +1073,13 @@ async def llm_reply_to_text_v2(
 
             try:
                 loop = asyncio.get_running_loop()
-                send_result = await loop.run_in_executor(None, send_audio_message, user_phone, temp_path)
+                # Try to get sf_id and payload for mapping
+                sf_id = None
+                payload_for_mapping = None
+                if context and isinstance(context, dict):
+                    sf_id = context.get("sf_id")
+                    payload_for_mapping = context.get("sf_payload") or {}
+                send_result = await loop.run_in_executor(None, send_audio_message, user_phone, temp_path, sf_id, payload_for_mapping)
                 log_event(
                     event_type="outgoing_message",
                     direction="outgoing",
@@ -1245,7 +1152,7 @@ async def llm_reply_to_text_v2(
             sf_id = None
             reply_id = context.get("reply_id")
             if reply_id and reply_id != "":
-                sf_id = get_sf_id_by_message_id(reply_id)  
+                sf_id = fetch_sf_id_by_message_id(reply_id)  
             # if sf_context and sf_context.get("sf_id"):
             #     sf_id = sf_context["sf_id"]
             # else:
@@ -1292,7 +1199,7 @@ async def llm_reply_to_text_v2(
                     print(f"[NEW SF RECORD] Created new Salesforce record with ID: {sf_id}")
                     salesforce_payload["salesforce_id"] = sf_id
                     salesforce_payload["sf_id"] = sf_id
-                    store_sf_message_link(sf_id, incoming_message_id, salesforce_payload)  
+                    store_reply_mapping(sf_id, incoming_message_id, salesforce_payload)  
                 sf_status = _salesforce_status_message(salesforce_result)
             else:
                 sf_status = None
@@ -1360,7 +1267,7 @@ async def llm_reply_to_text_v2(
             if message_content_str:
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content_str}")
-                send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str)
+                send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str, (salesforce_result or {}).get("salesforce_id"), salesforce_payload)
                 print("Message sent successfully on llm_reply_v2:", send_result)
                 message_id = (send_result or {}).get("message_id")
                 if not (send_result or {}).get("ok"):
