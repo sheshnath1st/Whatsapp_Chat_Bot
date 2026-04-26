@@ -1017,6 +1017,9 @@ async def llm_reply_to_text_v2(
         if kind == "audio" and media_id:
             sf_context = get_pending_sf_context(user_phone)
             if sf_context:
+                reply_id = context.get("reply_id") if context else None
+                if reply_id:
+                    sf_context["sf_id"] = context.get("sf_id")
                 await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
                 return
 
@@ -1213,7 +1216,7 @@ async def llm_reply_to_text_v2(
 
             # --- Always update Salesforce lead with reply detail ---
             # Try to get sf_id from context (pending SF context or from message_content)
-            sf_context = get_pending_sf_context(user_phone)
+            # sf_context = get_pending_sf_context(user_phone)
 
             sf_id = None
             reply_id = context.get("reply_id")
