@@ -10,7 +10,6 @@ def extract_crm_structured_data(input_data: dict) -> dict:
     import re
     from datetime import datetime
 
-    # Helper: extract with regex
     def extract(pattern, text):
         m = re.search(pattern, text, re.IGNORECASE)
         return m.group(1).strip() if m else ""
@@ -27,48 +26,46 @@ def extract_crm_structured_data(input_data: dict) -> dict:
     company = extract(r"(?:company|organization|org)[:\-\s]*([A-Za-z0-9 .,&'-]{2,})", user_input)
     designation = extract(r"(?:designation|title|position)[:\-\s]*([A-Za-z .'-]{2,})", user_input)
 
-    # Intent detection
-    intent = ""
-    action = ""
-    lowered = user_input.lower()
-    if lead_id and ("change" in lowered or "reschedule" in lowered or "update" in lowered):
-        intent = "update_meeting"
-        action = "update_meeting"
-    elif any(word in lowered for word in ["schedule", "set meeting"]):
-        intent = "schedule_meeting"
-        action = "schedule_meeting"
-    elif any(word in lowered for word in ["call", "remind"]):
-        intent = "follow_up"
-        action = "follow_up"
-    elif not lead_id:
-        intent = "create_lead"
-        action = "create_lead"
-
-    # Date/time extraction
+    # Date/time extraction (natural language)
     date = extract(r"(?:on|for|date)[:\-\s]*([\w\d\s]+)", user_input)
     time = extract(r"(?:at|time)[:\-\s]*([\d:apm\s]+)", user_input)
     datetime_iso = ""
-    # Try to resolve to ISO
     try:
-        from dateutil import parser as date_parser
-        dt_str = f"{date} {time}".strip()
-        if dt_str:
-            dt = date_parser.parse(dt_str, fuzzy=True)
-            datetime_iso = dt.isoformat()
+        from . import resolve_datetime
+        # Use the full user_input for best natural language support
+        datetime_iso = resolve_datetime(user_input) or ""
     except Exception:
         datetime_iso = ""
 
-    # If lead_id in context, always include it
-    # If s3_url in context, always include it
-    # If input contains media reference, map to s3_url (simple heuristic)
-    if not s3_url and re.search(r"s3://|https?://[\w\.-]+/.*\.(jpg|jpeg|png|mp3|wav|pdf)", user_input, re.IGNORECASE):
-        s3_url = extract(r"(s3://[\w\-/\.]+|https?://[\w\.-]+/[^\s]+\.(?:jpg|jpeg|png|mp3|wav|pdf))", user_input)
+    # Intent & action
+    lowered = user_input.lower()
+    intent = ""
+    action = ""
+    # If lead_id exists, never create new lead
+    if lead_id:
+        # If user changes time/date, intent = update_meeting
+        if any(word in lowered for word in ["change", "reschedule", "update", "move", "postpone", "delay"]):
+            intent = "update_meeting"
+            action = "update_meeting"
+        elif any(word in lowered for word in ["schedule", "set meeting"]):
+            intent = "schedule_meeting"
+            action = "schedule_meeting"
+        else:
+            intent = "follow_up"
+            action = "follow_up"
+    else:
+        if any(word in lowered for word in ["schedule", "set meeting"]):
+            intent = "schedule_meeting"
+            action = "schedule_meeting"
+        elif any(word in lowered for word in ["call", "remind"]):
+            intent = "follow_up"
+            action = "follow_up"
+        else:
+            intent = "create_lead"
+            action = "create_lead"
 
-    # Never remove existing lead_id or s3_url
-    # Never create new lead if lead_id exists
-    if lead_id and intent == "create_lead":
-        intent = "update_meeting"
-        action = "update_meeting"
+    # s3_url is always provided in context and must be returned as-is
+    # lead_id is always returned as-is if present
 
     # Build output
     result = {
@@ -85,7 +82,6 @@ def extract_crm_structured_data(input_data: dict) -> dict:
         "lead_id": lead_id,
         "s3_url": s3_url,
     }
-    # Fill missing with ""
     for k in result:
         if result[k] is None:
             result[k] = ""
