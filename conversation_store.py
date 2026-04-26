@@ -384,11 +384,11 @@ def store_sf_message_link(sf_id: str, message_id: str, payload: dict) -> None:
             "payload": payload,
             "created_at": _utc_now_iso(),
         }
-        col.update_one(
-            {"message_id": message_id},
-            {"$set": doc},
-            upsert=True,
-        )
+        # col.update_one(
+        #     {"message_id": message_id},
+        #     {"$set": doc},
+        #     upsert=True,
+        # )
         print(f"[MongoDB] sf_message_link saved for sf_id={sf_id} message_id={message_id}")
     except Exception as exc:
         print(f"MongoDB store_sf_message_link failed: {exc}")
