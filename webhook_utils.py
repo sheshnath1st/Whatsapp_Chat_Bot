@@ -1024,7 +1024,7 @@ async def _handle_audio_event_flow(
     )
     store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
     # --- Clear context ---
-    # clear_pending_sf_context(user_phone)
+    clear_pending_sf_context(user_phone)
     store_pending_sf_context(user_phone, sf_id, {})
 
 
