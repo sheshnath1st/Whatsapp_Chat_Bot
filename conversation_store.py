@@ -394,6 +394,7 @@ def get_sf_id_by_message_id(message_id: str) -> Optional[str]:
     try:
         col = _get_client()[MONGODB_DB]["sf_message_links"]
         doc = col.find_one({"message_id": message_id})
+        print(f"[MongoDB] get_sf_id_by_message_id for message_id={message_id} returned doc={doc}")
         if doc:
             return doc.get("sf_id")
         return None

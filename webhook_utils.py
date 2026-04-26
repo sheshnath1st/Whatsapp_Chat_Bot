@@ -940,13 +940,17 @@ async def llm_reply_to_text_v2(
     try:
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
         if kind == "audio" and media_id:
-            sf_context = get_pending_sf_context(user_phone)
-            if sf_context:
-                reply_id = context.get("reply_id") if context else None
-                if reply_id:
-                    sf_context["sf_id"] = context.get("sf_id")
-                await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
-                return
+            sf_context = get_pending_sf_context(user_phone) or {}
+            # Prefer sf_id from context if available
+            if context and context.get("sf_id"):
+                sf_context["sf_id"] = context.get("sf_id")
+            reply_id = context.get("reply_id") if context else None
+            if reply_id:
+                reply_id_data = fetch_sf_id_by_message_id(reply_id)
+                if reply_id_data:
+                    sf_context["sf_id"] = reply_id_data
+            await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
+            return
 
         headers = {
             "accept": "application/json",
