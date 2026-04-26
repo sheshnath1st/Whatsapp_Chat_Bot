@@ -896,9 +896,6 @@ async def _handle_audio_event_flow(
         sf_update_payload
     )
 
-    # --- Clear context ---
-    clear_pending_sf_context(user_phone)
-
     # --- Save to MongoDB ---
     update_contact_event(
         phone=user_phone,
@@ -994,6 +991,9 @@ async def _handle_audio_event_flow(
             "sf_result": sf_result,
         },
     )
+    # --- Clear context ---
+    clear_pending_sf_context(user_phone)
+
 
 async def llm_reply_to_text_v2(
     user_input: str,
@@ -1166,28 +1166,28 @@ async def llm_reply_to_text_v2(
             # Optionally, you can fetch the message content from your DB if needed
             # Here, we assume user_input is the message content
             # If you want to re-call OpenAI for extraction, do it here
-            llm_extract_headers = {
-                "accept": "application/json",
-                "Content-Type": "application/json",
-            }
-            llm_extract_data = {
-                "user_input": user_input,
-                "kind": kind or "text",
-            }
+            # llm_extract_headers = {
+            #     "accept": "application/json",
+            #     "Content-Type": "application/json",
+            # }
+            # llm_extract_data = {
+            #     "user_input": user_input,
+            #     "kind": kind or "text",
+            # }
             print(f"Calling LLM for extraction for message_id: {incoming_message_id}")
-            async with httpx.AsyncClient() as client:
-                llm_extract_response = await client.post(
-                    f"{AGENT_URL}/llm-response",
-                    json=llm_extract_data,
-                    headers=llm_extract_headers,
-                    timeout=120,
-                )
-            if llm_extract_response.status_code == 200:
-                llm_extract_json = llm_extract_response.json()
-                print(f"LLM extraction result for message_id {incoming_message_id}: {llm_extract_json}")
-                # Overwrite response_data with extracted details
-                if llm_extract_json.get("response"):
-                    response_data["response"] = llm_extract_json["response"]
+            # async with httpx.AsyncClient() as client:
+            #     llm_extract_response = await client.post(
+            #         f"{AGENT_URL}/llm-response",
+            #         json=llm_extract_data,
+            #         headers=llm_extract_headers,
+            #         timeout=120,
+            #     )
+            # if llm_extract_response.status_code == 200:
+            #     llm_extract_json = llm_extract_response.json()
+            #     print(f"LLM extraction result for message_id {incoming_message_id}: {llm_extract_json}")
+            #     # Overwrite response_data with extracted details
+            #     if llm_extract_json.get("response"):
+            #         response_data["response"] = llm_extract_json["response"]
 
         if response.status_code == 200 and response_data.get("error") is None:
             message_content = response_data.get("response")
@@ -1213,6 +1213,7 @@ async def llm_reply_to_text_v2(
 
             # If we have an sf_id, update the lead with the reply detail
             if sf_id:
+                print(f"[FORCE UPDATE] Using existing SF ID: {sf_id}")
                 update_payload = {}
                 if kind == "audio" and isinstance(message_content, dict):
                     update_payload["transcript"] = message_content.get("transcript")
@@ -1226,13 +1227,14 @@ async def llm_reply_to_text_v2(
                 update_payload["s3_url"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
-            elif salesforce_payload:
+            elif salesforce_payload and not sf_id:
                 # Fallback: create new if no sf_id
                 loop = asyncio.get_running_loop()
                 salesforce_payload["s3_url_reply"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
+                    print(f"[NEW SF RECORD] Created new Salesforce record with ID: {sf_id}")
                     salesforce_payload["salesforce_id"] = sf_id
                 sf_status = _salesforce_status_message(salesforce_result)
             else:

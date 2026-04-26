@@ -26,7 +26,11 @@ class WhatsAppMessage(BaseModel):
     object: str
     entry: list
 
-
+from conversation_store import (
+    log_event,
+    log_failure,
+    get_pending_sf_context,
+)
 def _extract_user_message(message: dict) -> tuple[str, Optional[str], Optional[str]]:
     """Return message text, media_id and detected kind."""
     if "text" in message:
@@ -122,7 +126,11 @@ def _process_incoming_messages(
         )
 
         # Pass s3_url in context to llm_reply_to_text_v2
-        context = {"s3_url": s3_url}
+        sf_context = get_pending_sf_context(user_phone)
+        context = {
+            "s3_url": s3_url,
+            "lead_id": sf_context.get("sf_id") if sf_context else ""
+        }
         print(f"Adding background task: llm_reply_to_text_v2 with context: {context}")
         background_tasks.add_task(
             llm_reply_to_text_v2,
