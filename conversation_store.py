@@ -341,13 +341,7 @@ def get_conversation(phone: str, context_id: str = None, user_id: str = None) ->
     If wa_id or user_id is provided, use it as the unique key. Fallback to phone if not.
     """
     # Prefer user_id, then wa_id, then phone for unique conversation key
-    
-    # if context_id:
-    #     conv_key = f"conv_{context_id}"
-    # elif user_id:
-    #     conv_key = f"conv_{user_id}"
-    # else:
-    #     conv_key = f"conv_{phone}"
+
     with _LOCK:
         try:
             if context_id:
@@ -384,11 +378,11 @@ def store_sf_message_link(sf_id: str, message_id: str, payload: dict) -> None:
             "payload": payload,
             "created_at": _utc_now_iso(),
         }
-        # col.update_one(
-        #     {"message_id": message_id},
-        #     {"$set": doc},
-        #     upsert=True,
-        # )
+        col.update_one(
+            {"message_id": message_id},
+            {"$set": doc},
+            upsert=True,
+        )
         print(f"[MongoDB] sf_message_link saved for sf_id={sf_id} message_id={message_id}")
     except Exception as exc:
         print(f"MongoDB store_sf_message_link failed: {exc}")
