@@ -37,7 +37,6 @@ def extract_crm_structured_data(input_data: dict) -> dict:
     except Exception:
         datetime_iso = ""
 
-    # Intent & action
     lowered = user_input.lower()
     intent = ""
     action = ""
@@ -150,6 +149,7 @@ def resolve_datetime(text: str) -> str:
         day = int(m.group(1))
         month = MONTHS[m.group(2)]
         year = now.year
+
         try:
             base_date = datetime(year, month, day)
             if base_date < now:
