@@ -812,10 +812,27 @@ async def _handle_audio_event_flow(
     response_data = response.json()
     result = response_data.get("response") or {}
 
+    # --- Extract transcript and normalize ---
     transcript = result.get("transcript", "") or ""
     normalized_transcript = normalize_numbers(transcript)
 
+    # --- Extract contact info if present ---
+    contact = result.get("contact") or {}
+    contact_present = any(contact.get(k) for k in ["full_name", "phone", "email", "company", "designation"])
+    if contact_present:
+        print(f"[AudioFlow] Extracted contact: {contact}")
+        # Save contact to DB (legacy/CRM)
+        save_contact(
+            phone=user_phone,
+            extracted_data=contact,
+            sf_id=sf_context.get("sf_id"),
+            source="audio",
+            message_id=incoming_message_id,
+        )
+
+    # --- Extract event info if present ---
     event = result.get("event") or {}
+    intent = result.get("intent") or event.get("type") or ""
 
     # --- Prepare Salesforce payload ---
     sf_update_payload = {"transcript": normalized_transcript}
@@ -862,8 +879,8 @@ async def _handle_audio_event_flow(
         print(f"Datetime resolution failed: {e}")
         meeting_datetime = None
 
-    # Add event if exists
-    if isinstance(event, dict) and any(event.values()):
+    # Add event if exists or intent detected
+    if (isinstance(event, dict) and any(event.values())) or intent:
         sf_update_payload["event"] = event
 
     # Add datetime if resolved
@@ -945,7 +962,7 @@ async def _handle_audio_event_flow(
         f"Transcript: {normalized_transcript}"
         f"{event_summary}\n\n"
         f"{sf_status}"
-)
+    )
 
     # --- Send reply ---
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
