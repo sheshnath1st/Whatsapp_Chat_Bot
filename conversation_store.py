@@ -274,22 +274,37 @@ def upsert_conversation_message(phone: str, message_doc: dict) -> None:
             print(f"MongoDB upsert_conversation_message failed: {exc}")
 
 
-def find_sf_id_by_context_id(phone: str, context_id: str) -> Optional[str]:
+def find_sf_id_by_context_id(phone: str, context_id: str, wa_id: str = None, user_id: str = None) -> Optional[str]:
     """
     Search the conversation messages for a message with message_id == context_id and return its sf_id if present.
+    Uses wa_id/user_id as the unique key if provided.
     """
-    conv = get_conversation(phone)
-    if not conv:
-        return None
-    messages = conv.get("messages") or []
-    for msg in messages:
-        if msg.get("message_id") == context_id:
-            # Try to get sf_id from message or its salesforce field
-            sf_id = msg.get("sf_id")
-            if not sf_id:
-                sf = (msg.get("salesforce") or {}).get("response") or {}
-                sf_id = sf.get("sf_id") or sf.get("salesforce_id")
-            return sf_id
+    conv = get_conversation(phone, context_id=context_id, user_id=user_id)
+    if conv:
+        messages = conv.get("messages") or []
+        for msg in messages:
+            if msg.get("message_id") == context_id:
+                # Try to get sf_id from message or its salesforce field
+                sf_id = msg.get("sf_id")
+                if not sf_id:
+                    sf = (msg.get("salesforce") or {}).get("response") or {}
+                    sf_id = sf.get("sf_id") or sf.get("salesforce_id")
+                return sf_id
+
+    # Fallback: search event log for salesforce_sync with related_message_id == context_id
+    col = _get_collection()
+    event = col.find_one({
+        "event_type": "salesforce_sync",
+        "related_message_id": context_id
+    })
+    if event:
+        payload = event.get("payload") or {}
+        # Try to get sf_id from payload or sf_result
+        sf_id = payload.get("sf_id")
+        if not sf_id:
+            sf_result = payload.get("sf_result") or {}
+            sf_id = sf_result.get("salesforce_id") or sf_result.get("sf_id")
+        return sf_id
     return None
 
 
@@ -320,21 +335,27 @@ def update_conversation_sf_and_context(
 
 
 
-def get_conversation(phone: str, wa_id: str = None, user_id: str = None) -> Optional[dict]:
+def get_conversation(phone: str, context_id: str = None, user_id: str = None) -> Optional[dict]:
     """
     Return the full conversation document for a user. Prefer WhatsApp wa_id or user_id for uniqueness.
     If wa_id or user_id is provided, use it as the unique key. Fallback to phone if not.
     """
     # Prefer user_id, then wa_id, then phone for unique conversation key
-    if user_id:
-        conv_key = f"conv_{user_id}"
-    elif wa_id:
-        conv_key = f"conv_{wa_id}"
-    else:
-        conv_key = f"conv_{phone}"
+    
+    # if context_id:
+    #     conv_key = f"conv_{context_id}"
+    # elif user_id:
+    #     conv_key = f"conv_{user_id}"
+    # else:
+    #     conv_key = f"conv_{phone}"
     with _LOCK:
         try:
-            return _get_conversations_collection().find_one({"_id": conv_key})
+            if context_id:
+                return _get_conversations_collection().find_one({"message_id": context_id})
+            elif user_id:
+                return _get_conversations_collection().find_one({"user_id": user_id})
+            else:
+                return _get_conversations_collection().find_one({"_id": f"conv_{phone}"})
         except (RuntimeError, PyMongoError) as exc:
             print(f"MongoDB get_conversation failed: {exc}")
             return None
@@ -347,3 +368,41 @@ def get_recent_messages(phone: str, limit: int = 10) -> list:
         return []
     messages = conv.get("messages") or []
     return messages[-limit:] if len(messages) > limit else messages
+
+
+# ── Salesforce message link store ────────────────────────────────────────────
+
+def store_sf_message_link(sf_id: str, message_id: str, payload: dict) -> None:
+    """
+    Store a mapping of Salesforce ID, WhatsApp message ID, and payload in a dedicated collection.
+    """
+    try:
+        col = _get_client()[MONGODB_DB]["sf_message_links"]
+        doc = {
+            "sf_id": sf_id,
+            "message_id": message_id,
+            "payload": payload,
+            "created_at": _utc_now_iso(),
+        }
+        col.update_one(
+            {"message_id": message_id},
+            {"$set": doc},
+            upsert=True,
+        )
+        print(f"[MongoDB] sf_message_link saved for sf_id={sf_id} message_id={message_id}")
+    except Exception as exc:
+        print(f"MongoDB store_sf_message_link failed: {exc}")
+
+def get_sf_id_by_message_id(message_id: str) -> Optional[str]:
+    """
+    Fetch the Salesforce ID for a given WhatsApp message ID from the sf_message_links collection.
+    """
+    try:
+        col = _get_client()[MONGODB_DB]["sf_message_links"]
+        doc = col.find_one({"message_id": message_id})
+        if doc:
+            return doc.get("sf_id")
+        return None
+    except Exception as exc:
+        print(f"MongoDB get_sf_id_by_message_id failed: {exc}")
+        return None

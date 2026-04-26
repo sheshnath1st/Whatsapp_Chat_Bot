@@ -85,7 +85,9 @@ def _process_incoming_messages(
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
-        print(f"User phone: {user_phone}")
+        wa_id = user_phone
+        user_id = message.get("from_user_id")
+        print(f"User phone: {user_phone}, wa_id: {wa_id}, user_id: {user_id}")
         incoming_message_id = message.get("id")
         print(f"Incoming message ID: {incoming_message_id}")
         user_message, media_id, kind = _extract_user_message(message)
@@ -97,10 +99,13 @@ def _process_incoming_messages(
         reply_to = message.get("context", {}).get("id") or ""
         print(f"Reply_to: {reply_to}")
 
-        # 3. Match reply_to (context.id) to previous message_id in conversation
+        # 3. Match reply_to (context.id) to previous message_id in conversation using wa_id/user_id
         sf_id = None
         if reply_to:
-            sf_id = find_sf_id_by_context_id(user_phone, reply_to)
+            sf_id = find_sf_id_by_context_id(user_phone, reply_to, wa_id=wa_id, user_id=user_id)
+        else:
+            print("No reply_to context found in message.")
+
         print(f"Mapped sf_id for this message: {sf_id}")
 
         s3_url = ""
@@ -129,18 +134,19 @@ def _process_incoming_messages(
         if s3_detail:
             payload["s3_detail"] = s3_detail
         print(f"Logging incoming message event: {payload}")
-        log_event(
-            event_type="incoming_message",
-            direction="incoming",
-            phone=user_phone,
-            message_id=incoming_message_id,
-            payload=payload,
-        )
+        # log_event(
+        #     event_type="incoming_message",
+        #     direction="incoming",
+        #     phone=user_phone,
+        #     message_id=incoming_message_id,
+        #     payload=payload,
+        # )
 
         # 4. Pass s3_url and sf_id in context to llm_reply_to_text_v2
         context = {
             "s3_url": s3_url,
-            "lead_id": sf_id or ""
+            "lead_id": sf_id or "",
+             "reply_id": reply_to or ""
         }
         print(f"Adding background task: llm_reply_to_text_v2 with context: {context}")
         background_tasks.add_task(

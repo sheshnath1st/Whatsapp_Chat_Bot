@@ -247,6 +247,8 @@ from conversation_store import (
     upsert_conversation_message,
     update_conversation_sf_and_context,
     get_recent_messages,
+    store_sf_message_link,
+    get_sf_id_by_message_id,
 )
 
 load_dotenv()
@@ -1214,18 +1216,21 @@ async def llm_reply_to_text_v2(
             sf_context = get_pending_sf_context(user_phone)
 
             sf_id = None
-            if sf_context and sf_context.get("sf_id"):
-                sf_id = sf_context["sf_id"]
-            else:
-                # 🔥 FALLBACK FROM CONVERSATION (VERY IMPORTANT)
-                recent = get_recent_messages(user_phone, limit=5)
-                for msg in recent:
-                    sf = (msg.get("salesforce") or {}).get("response") or {}
-                    if sf.get("sf_id"):
-                        sf_id = sf["sf_id"]
-                        print(f"[FALLBACK SF_ID FOUND]: {sf_id}")
-                        break
-            sf_context = get_pending_sf_context(user_phone)
+            reply_id = context.get("reply_id")
+            if reply_id and reply_id != "":
+                sf_id = get_sf_id_by_message_id(reply_id)  
+            # if sf_context and sf_context.get("sf_id"):
+            #     sf_id = sf_context["sf_id"]
+            # else:
+            #     # 🔥 FALLBACK FROM CONVERSATION (VERY IMPORTANT)
+            #     recent = get_recent_messages(user_phone, limit=5)
+            #     for msg in recent:
+            #         sf = (msg.get("salesforce") or {}).get("response") or {}
+            #         if sf.get("sf_id"):
+            #             sf_id = sf["sf_id"]
+            #             print(f"[FALLBACK SF_ID FOUND]: {sf_id}")
+            #             break
+            # sf_context = get_pending_sf_context(user_phone)
             # if sf_context and sf_context.get("sf_id"):
             #     sf_id = sf_context["sf_id"]
             # elif isinstance(message_content, dict):
@@ -1245,6 +1250,7 @@ async def llm_reply_to_text_v2(
                     update_payload["transcript"] = user_input
                 # Optionally, merge in more fields if needed
                 loop = asyncio.get_running_loop()
+
                 update_payload["s3_url"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
@@ -1252,6 +1258,7 @@ async def llm_reply_to_text_v2(
                 # Fallback: create new if no sf_id
                 print("[BLOCKED CREATE] No SF ID found, skipping lead creation")
                 loop = asyncio.get_running_loop()
+                store_sf_message_link(sf_id, incoming_message_id, salesforce_payload)   
                 salesforce_payload["s3_url_reply"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
