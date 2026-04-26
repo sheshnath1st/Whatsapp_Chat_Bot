@@ -1,3 +1,111 @@
+def sanitize_llm_response(data):
+    """
+    Recursively replace None with '' for strings and {} for dicts in LLM response.
+    """
+    if isinstance(data, dict):
+        sanitized = {}
+        for k, v in data.items():
+            if v is None:
+                # Use empty dict for event, metadata, contact, else empty string
+                if k in {"event", "metadata", "contact"}:
+                    sanitized[k] = {} if k != "metadata" else {"confidence_score": 0.0}
+                else:
+                    sanitized[k] = ""
+            else:
+                sanitized[k] = sanitize_llm_response(v)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_llm_response(item) for item in data]
+    else:
+        return data
+    
+def extract_crm_structured_data(input_data: dict) -> dict:
+    """
+    Extracts structured CRM data from input dict according to strict rules.
+    Input dict should have keys:
+        - 'user_input': str (raw user message)
+        - 'context': dict with optional 'lead_id', 's3_url'
+    Returns dict with keys:
+        full_name, phone, email, company, designation, intent, action, date, time, datetime_iso, lead_id, s3_url
+    """
+    import re
+    from datetime import datetime
+
+    def extract(pattern, text):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    user_input = input_data.get("user_input", "") or ""
+    context = input_data.get("context", {}) or {}
+    lead_id = context.get("lead_id", "") or ""
+    s3_url = context.get("s3_url", "") or ""
+
+    # Contact extraction
+    full_name = extract(r"(?:name|full name)[:\-\s]*([A-Za-z .']{2,})", user_input)
+    phone = extract(r"(?:phone|mobile|contact)[:\-\s]*([+\d][\d\s\-]{7,})", user_input)
+    email = extract(r"([\w\.-]+@[\w\.-]+)", user_input)
+    company = extract(r"(?:company|organization|org)[:\-\s]*([A-Za-z0-9 .,&'-]{2,})", user_input)
+    designation = extract(r"(?:designation|title|position)[:\-\s]*([A-Za-z .'-]{2,})", user_input)
+
+    # Date/time extraction (natural language)
+    date = extract(r"(?:on|for|date)[:\-\s]*([\w\d\s]+)", user_input)
+    time = extract(r"(?:at|time)[:\-\s]*([\d:apm\s]+)", user_input)
+    datetime_iso = ""
+    try:
+        from . import resolve_datetime
+        # Use the full user_input for best natural language support
+        datetime_iso = resolve_datetime(user_input) or ""
+    except Exception:
+        datetime_iso = ""
+
+    lowered = user_input.lower()
+    intent = ""
+    action = ""
+    # If lead_id exists, never create new lead
+    if lead_id:
+        # If user changes time/date, intent = update_meeting
+        if any(word in lowered for word in ["change", "reschedule", "update", "move", "postpone", "delay"]):
+            intent = "update_meeting"
+            action = "update_meeting"
+        elif any(word in lowered for word in ["schedule", "set meeting"]):
+            intent = "schedule_meeting"
+            action = "schedule_meeting"
+        else:
+            intent = "follow_up"
+            action = "follow_up"
+    else:
+        if any(word in lowered for word in ["schedule", "set meeting"]):
+            intent = "schedule_meeting"
+            action = "schedule_meeting"
+        elif any(word in lowered for word in ["call", "remind"]):
+            intent = "follow_up"
+            action = "follow_up"
+        else:
+            intent = "create_lead"
+            action = "create_lead"
+
+    # s3_url is always provided in context and must be returned as-is
+    # lead_id is always returned as-is if present
+
+    # Build output
+    result = {
+        "full_name": full_name,
+        "phone": phone,
+        "email": email,
+        "company": company,
+        "designation": designation,
+        "intent": intent,
+        "action": action,
+        "date": date,
+        "time": time,
+        "datetime_iso": datetime_iso,
+        "lead_id": lead_id,
+        "s3_url": s3_url,
+    }
+    for k in result:
+        if result[k] is None:
+            result[k] = ""
+    return result
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -62,6 +170,7 @@ def resolve_datetime(text: str) -> str:
         day = int(m.group(1))
         month = MONTHS[m.group(2)]
         year = now.year
+
         try:
             base_date = datetime(year, month, day)
             if base_date < now:
@@ -138,6 +247,8 @@ from conversation_store import (
     upsert_conversation_message,
     update_conversation_sf_and_context,
     get_recent_messages,
+    store_sf_message_link,
+    get_sf_id_by_message_id,
 )
 
 load_dotenv()
@@ -311,7 +422,9 @@ def send_message(to: str, text: str):
         try:
             send_attempt = _send_message_once(payload, headers)
             if send_attempt["status_code"] == 200:
-                print("Message sent")
+                print("Message sent successfully:", send_attempt)
+                if not send_attempt.get("message_id"):
+                    print("Warning: Message sent but no message_id returned in response.")
                 return {
                     "ok": True,
                     "status_code": send_attempt["status_code"],
@@ -331,7 +444,7 @@ def send_message(to: str, text: str):
 
 async def send_message_async(user_phone: str, message: str):
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, send_message, user_phone, message)
+    return await loop.run_in_executor(None, send_message, user_phone, message)
 
 
 
@@ -354,7 +467,7 @@ def send_to_salesforce(business_card_data: dict):
         if SALESFORCE_COOKIE:
             headers["Cookie"] = SALESFORCE_COOKIE
         
-        print(f"Sending business card data to Salesforce: {business_card_data}")
+        print(f"==== Sending business card data to Salesforce:\n {business_card_data}")
         response = requests.post(
             SALESFORCE_API_URL,
             headers=headers,
@@ -428,7 +541,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         return {"ok": False, "error": "salesforce_url_not_configured"}
 
     try:
-        print(f"Updating Salesforce record {sf_id} with payload: {payload}")
+        print(f"==============Updating Salesforce record {sf_id} with payload:\n {payload}")
 
         payload = payload or {}
         event = payload.get("event") or {}
@@ -677,7 +790,13 @@ async def _handle_audio_event_flow(
 ):
     """Flow: Audio → Transcription → Event extraction → Salesforce update"""
 
-    sf_id = sf_context["sf_id"]
+    from conversation_store import get_sf_id_by_message_id, store_sf_message_link
+    reply_id = sf_context.get("reply_id")
+    sf_id = None
+    if reply_id:
+        sf_id = get_sf_id_by_message_id(reply_id)
+    if not sf_id:
+        sf_id = sf_context.get("sf_id")
     headers = {"accept": "application/json", "Content-Type": "application/json"}
     json_data = {"user_input": "", "media_id": media_id, "kind": "audio_event"}
 
@@ -694,22 +813,47 @@ async def _handle_audio_event_flow(
 
     if response.status_code != 200:
         print(f"[Flow1] audio_event endpoint error: {response.status_code}")
-        await send_message_async(
+        result = await send_message_async(
             user_phone,
             "Could not process your voice message. Please try again."
         )
+        if result.get("message_id"):
+            store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
         return
 
     response_data = response.json()
     result = response_data.get("response") or {}
 
+    # --- Extract transcript and normalize ---
     transcript = result.get("transcript", "") or ""
     normalized_transcript = normalize_numbers(transcript)
 
+    # --- Extract contact info if present ---
+    contact = result.get("contact") or {}
+    contact_present = any(contact.get(k) for k in ["full_name", "phone", "email", "company", "designation"])
+    if contact_present:
+        print(f"[AudioFlow] Extracted contact: {contact}")
+        # Save contact to DB (legacy/CRM)
+        save_contact(
+            phone=user_phone,
+            extracted_data=contact,
+            sf_id=sf_context.get("sf_id"),
+            source="audio",
+            message_id=incoming_message_id,
+        )
+
+    # --- Extract event info if present ---
     event = result.get("event") or {}
+    intent = result.get("intent") or event.get("type") or ""
 
     # --- Prepare Salesforce payload ---
-    sf_update_payload = {"transcript": normalized_transcript}
+    sf_update_payload = {
+        "transcript": normalized_transcript
+    }
+    # Always include s3_url if available in sf_context
+    s3_url = sf_context.get("s3_url")
+    if s3_url:
+        sf_update_payload["s3_url"] = s3_url
     meeting_datetime = None
 
     def clean_value(val):
@@ -753,8 +897,8 @@ async def _handle_audio_event_flow(
         print(f"Datetime resolution failed: {e}")
         meeting_datetime = None
 
-    # Add event if exists
-    if isinstance(event, dict) and any(event.values()):
+    # Add event if exists or intent detected
+    if (isinstance(event, dict) and any(event.values())) or intent:
         sf_update_payload["event"] = event
 
     # Add datetime if resolved
@@ -763,15 +907,27 @@ async def _handle_audio_event_flow(
 
     # --- Send to Salesforce ---
     loop = asyncio.get_running_loop()
-    sf_result = await loop.run_in_executor(
-        None,
-        send_to_salesforce_update,
-        sf_id,
-        sf_update_payload
-    )
-
-    # --- Clear context ---
-    clear_pending_sf_context(user_phone)
+    sf_result = None
+    if sf_id:
+        sf_result = await loop.run_in_executor(
+            None,
+            send_to_salesforce_update,
+            sf_id,
+            sf_update_payload
+        )
+        # Store mapping for future replies
+        if sf_result and sf_result.get("ok"):
+            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+    else:
+        # No sf_id found, create new lead
+        sf_result = await loop.run_in_executor(
+            None,
+            send_to_salesforce,
+            sf_update_payload
+        )
+        sf_id = (sf_result or {}).get("salesforce_id")
+        if sf_id:
+            store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
 
     # --- Save to MongoDB ---
     update_contact_event(
@@ -836,11 +992,11 @@ async def _handle_audio_event_flow(
         f"Transcript: {normalized_transcript}"
         f"{event_summary}\n\n"
         f"{sf_status}"
-)
+    )
 
     # --- Send reply ---
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
-
+    print("Message sent successfully on handle audio:", send_result)
     # --- Logging ---
     log_event(
         event_type="outgoing_message",
@@ -868,6 +1024,11 @@ async def _handle_audio_event_flow(
             "sf_result": sf_result,
         },
     )
+    store_sf_message_link(sf_id, incoming_message_id, sf_update_payload)
+    # --- Clear context ---
+    clear_pending_sf_context(user_phone)
+    store_pending_sf_context(user_phone, sf_id, {})
+
 
 async def llm_reply_to_text_v2(
     user_input: str,
@@ -875,12 +1036,16 @@ async def llm_reply_to_text_v2(
     media_id: str = None,
     kind: str = None,
     incoming_message_id: str = None,
+    context: dict = None,
 ):
     try:
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
         if kind == "audio" and media_id:
             sf_context = get_pending_sf_context(user_phone)
             if sf_context:
+                reply_id = context.get("reply_id") if context else None
+                if reply_id:
+                    sf_context["sf_id"] = context.get("sf_id")
                 await _handle_audio_event_flow(user_phone, media_id, incoming_message_id, sf_context)
                 return
 
@@ -1028,6 +1193,9 @@ async def llm_reply_to_text_v2(
 
         response_data = response.json()
         print("LLM API response:", response_data, "of type", type(user_phone))
+        # Sanitize LLM response to prevent NoneType errors
+        if isinstance(response_data, dict) and "response" in response_data:
+            response_data["response"] = sanitize_llm_response(response_data["response"])
 
         # --- If incoming_message_id and conversation_id are present, fetch transcript/event using LLM ---
         # (Assume conversation_id is passed as an argument or can be extracted from webhook payload if needed)
@@ -1036,28 +1204,28 @@ async def llm_reply_to_text_v2(
             # Optionally, you can fetch the message content from your DB if needed
             # Here, we assume user_input is the message content
             # If you want to re-call OpenAI for extraction, do it here
-            llm_extract_headers = {
-                "accept": "application/json",
-                "Content-Type": "application/json",
-            }
-            llm_extract_data = {
-                "user_input": user_input,
-                "kind": kind or "text",
-            }
+            # llm_extract_headers = {
+            #     "accept": "application/json",
+            #     "Content-Type": "application/json",
+            # }
+            # llm_extract_data = {
+            #     "user_input": user_input,
+            #     "kind": kind or "text",
+            # }
             print(f"Calling LLM for extraction for message_id: {incoming_message_id}")
-            async with httpx.AsyncClient() as client:
-                llm_extract_response = await client.post(
-                    f"{AGENT_URL}/llm-response",
-                    json=llm_extract_data,
-                    headers=llm_extract_headers,
-                    timeout=120,
-                )
-            if llm_extract_response.status_code == 200:
-                llm_extract_json = llm_extract_response.json()
-                print(f"LLM extraction result for message_id {incoming_message_id}: {llm_extract_json}")
-                # Overwrite response_data with extracted details
-                if llm_extract_json.get("response"):
-                    response_data["response"] = llm_extract_json["response"]
+            # async with httpx.AsyncClient() as client:
+            #     llm_extract_response = await client.post(
+            #         f"{AGENT_URL}/llm-response",
+            #         json=llm_extract_data,
+            #         headers=llm_extract_headers,
+            #         timeout=120,
+            #     )
+            # if llm_extract_response.status_code == 200:
+            #     llm_extract_json = llm_extract_response.json()
+            #     print(f"LLM extraction result for message_id {incoming_message_id}: {llm_extract_json}")
+            #     # Overwrite response_data with extracted details
+            #     if llm_extract_json.get("response"):
+            #         response_data["response"] = llm_extract_json["response"]
 
         if response.status_code == 200 and response_data.get("error") is None:
             message_content = response_data.get("response")
@@ -1074,15 +1242,33 @@ async def llm_reply_to_text_v2(
 
             # --- Always update Salesforce lead with reply detail ---
             # Try to get sf_id from context (pending SF context or from message_content)
-            sf_context = get_pending_sf_context(user_phone)
-            if sf_context and sf_context.get("sf_id"):
-                sf_id = sf_context["sf_id"]
-            elif isinstance(message_content, dict):
-                # Try to get from message_content
-                sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
+            # sf_context = get_pending_sf_context(user_phone)
+
+            sf_id = None
+            reply_id = context.get("reply_id")
+            if reply_id and reply_id != "":
+                sf_id = get_sf_id_by_message_id(reply_id)  
+            # if sf_context and sf_context.get("sf_id"):
+            #     sf_id = sf_context["sf_id"]
+            # else:
+            #     # 🔥 FALLBACK FROM CONVERSATION (VERY IMPORTANT)
+            #     recent = get_recent_messages(user_phone, limit=5)
+            #     for msg in recent:
+            #         sf = (msg.get("salesforce") or {}).get("response") or {}
+            #         if sf.get("sf_id"):
+            #             sf_id = sf["sf_id"]
+            #             print(f"[FALLBACK SF_ID FOUND]: {sf_id}")
+            #             break
+            # sf_context = get_pending_sf_context(user_phone)
+            # if sf_context and sf_context.get("sf_id"):
+            #     sf_id = sf_context["sf_id"]
+            # elif isinstance(message_content, dict):
+            #     # Try to get from message_content
+            #     sf_id = message_content.get("salesforce_id") or message_content.get("sf_id")
 
             # If we have an sf_id, update the lead with the reply detail
             if sf_id:
+                print(f"[FORCE UPDATE] Using existing SF ID: {sf_id}")
                 update_payload = {}
                 if kind == "audio" and isinstance(message_content, dict):
                     update_payload["transcript"] = message_content.get("transcript")
@@ -1093,15 +1279,22 @@ async def llm_reply_to_text_v2(
                     update_payload["transcript"] = user_input
                 # Optionally, merge in more fields if needed
                 loop = asyncio.get_running_loop()
+
+                update_payload["s3_url"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
-            elif salesforce_payload:
+            elif salesforce_payload and not sf_id:
                 # Fallback: create new if no sf_id
-                loop = asyncio.get_running_loop()
+                print("[BLOCKED CREATE] No SF ID found, skipping lead creation")
+                loop = asyncio.get_running_loop() 
+                salesforce_payload["s3_url_reply"] = context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
+                    print(f"[NEW SF RECORD] Created new Salesforce record with ID: {sf_id}")
                     salesforce_payload["salesforce_id"] = sf_id
+                    salesforce_payload["sf_id"] = sf_id
+                    store_sf_message_link(sf_id, incoming_message_id, salesforce_payload)  
                 sf_status = _salesforce_status_message(salesforce_result)
             else:
                 sf_status = None
@@ -1170,6 +1363,8 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content_str}")
                 send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str)
+                print("Message sent successfully on llm_reply_v2:", send_result)
+                message_id = (send_result or {}).get("message_id")
                 if not (send_result or {}).get("ok"):
                     log_failure(
                         source="llm_reply_to_text_v2.send_message_failed",
@@ -1182,7 +1377,7 @@ async def llm_reply_to_text_v2(
                     event_type="outgoing_message",
                     direction="outgoing",
                     phone=user_phone,
-                    message_id=(send_result or {}).get("message_id"),
+                    message_id=message_id,
                     related_message_id=incoming_message_id,
                     payload={
                         "kind": kind or "text",
@@ -1192,6 +1387,14 @@ async def llm_reply_to_text_v2(
                         "salesforce_result": salesforce_result,
                         "whatsapp_send_result": send_result,
                     },
+                )
+                # Save the message_id as the last backend message for reply tracking
+                update_conversation_sf_and_context(user_phone, last_intent=None, last_event_date=None)
+                # Also store the message_id as 'last_bot_message_id' in conversation context
+                from conversation_store import _get_conversations_collection
+                _get_conversations_collection().update_one(
+                    {"_id": f"conv_{user_phone}"},
+                    {"$set": {"context.last_bot_message_id": message_id}},
                 )
 
                 if salesforce_result:
@@ -1237,7 +1440,9 @@ async def llm_reply_to_text_v2(
                     related_message_id=incoming_message_id,
                     payload={"llm_response": response_data},
                 )
-                await send_message_async(user_phone, "Received empty response from LLM API.")
+                result = await send_message_async(user_phone, "Received empty response from LLM API.")
+                print("Send result for empty response notification:", result)
+                # store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
         else:
             print("Error: Invalid LLM API response", response_data)
             log_failure(
