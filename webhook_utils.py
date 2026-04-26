@@ -422,7 +422,7 @@ def send_message(to: str, text: str):
         try:
             send_attempt = _send_message_once(payload, headers)
             if send_attempt["status_code"] == 200:
-                print("Message sent")
+                print("Message sent successfully:", send_attempt)
                 return {
                     "ok": True,
                     "status_code": send_attempt["status_code"],
@@ -994,7 +994,7 @@ async def _handle_audio_event_flow(
 
     # --- Send reply ---
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply)
-
+    print("Message sent successfully on handle audio:", send_result)
     # --- Logging ---
     log_event(
         event_type="outgoing_message",
@@ -1361,6 +1361,7 @@ async def llm_reply_to_text_v2(
                 loop = asyncio.get_running_loop()
                 print(f"Sending message to {user_phone}: {message_content_str}")
                 send_result = await loop.run_in_executor(None, send_message, user_phone, message_content_str)
+                print("Message sent successfully on llm_reply_v2:", send_result)
                 message_id = (send_result or {}).get("message_id")
                 if not (send_result or {}).get("ok"):
                     log_failure(
