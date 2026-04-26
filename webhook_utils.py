@@ -442,7 +442,7 @@ def send_to_salesforce(business_card_data: dict):
         if SALESFORCE_COOKIE:
             headers["Cookie"] = SALESFORCE_COOKIE
         
-        print(f"Sending business card data to Salesforce: {business_card_data}")
+        print(f"==== Sending business card data to Salesforce:\n {business_card_data}")
         response = requests.post(
             SALESFORCE_API_URL,
             headers=headers,
@@ -516,7 +516,7 @@ def send_to_salesforce_update(sf_id: str, payload: dict):
         return {"ok": False, "error": "salesforce_url_not_configured"}
 
     try:
-        print(f"Updating Salesforce record {sf_id} with payload: {payload}")
+        print(f"==============Updating Salesforce record {sf_id} with payload:\n {payload}")
 
         payload = payload or {}
         event = payload.get("event") or {}
