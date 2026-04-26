@@ -251,7 +251,6 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
         handled_messages = 0
         handled_statuses = 0
-        
         for entry in message_data.entry:
             changes = entry.get("changes") or []
             for change_item in changes:
@@ -259,7 +258,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 metadata = change.get("metadata", {})
                 incoming_phone_id = metadata.get("phone_number_id")
 
-                if _is_ignored_phone(incoming_phone_id):
+                if _is_ignored_phone(incoming_phone_id) or change.get("messages") is None:
                     print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
                     continue
 
