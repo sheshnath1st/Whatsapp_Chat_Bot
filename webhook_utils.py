@@ -963,6 +963,7 @@ async def llm_reply_to_text_v2(
     media_id: str = None,
     kind: str = None,
     incoming_message_id: str = None,
+    context: dict = None,
 ):
     try:
         # Flow 1 step 6-9: if user sends audio and a card was recently scanned, treat as event follow-up
@@ -1181,11 +1182,13 @@ async def llm_reply_to_text_v2(
                     update_payload["transcript"] = user_input
                 # Optionally, merge in more fields if needed
                 loop = asyncio.get_running_loop()
+                update_payload["s3_url"] = sf_context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce_update, sf_id, update_payload)
                 sf_status = _salesforce_status_message(salesforce_result)
             elif salesforce_payload:
                 # Fallback: create new if no sf_id
                 loop = asyncio.get_running_loop()
+                salesforce_payload["s3_url_reply"] = sf_context.get("s3_url") or ""  # Pass s3_url in context for potential use in update
                 salesforce_result = await loop.run_in_executor(None, send_to_salesforce, salesforce_payload)
                 sf_id = (salesforce_result or {}).get("salesforce_id")
                 if sf_id:
