@@ -80,6 +80,7 @@ def _process_incoming_messages(
     handled_messages = 0
     messages = change.get("messages") or []
     print(f"Processing {len(messages)} incoming messages...")
+    from conversation_store import _get_conversations_collection
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
@@ -90,6 +91,22 @@ def _process_incoming_messages(
         print(f"Extracted user_message: {user_message}")
         print(f"Extracted media_id: {media_id}")
         print(f"Detected kind: {kind}")
+
+        # 2. Extract reply_to from message context
+        reply_to = message.get("context", {}).get("id") or ""
+        print(f"Reply_to: {reply_to}")
+
+        # 3. Match reply_to with last_bot_message_id in DB
+        conv_coll = _get_conversations_collection()
+        conv_doc = conv_coll.find_one({"_id": f"conv_{user_phone}"}) or {}
+        last_bot_message_id = conv_doc.get("context", {}).get("last_bot_message_id")
+        last_sf_id = conv_doc.get("context", {}).get("last_sf_id")
+        print(f"last_bot_message_id: {last_bot_message_id}, last_sf_id: {last_sf_id}")
+        if reply_to and reply_to == last_bot_message_id:
+            sf_id = last_sf_id
+        else:
+            sf_id = None
+        print(f"Mapped sf_id for this message: {sf_id}")
 
         s3_url = ""
         s3_detail = None
@@ -125,11 +142,10 @@ def _process_incoming_messages(
             payload=payload,
         )
 
-        # Pass s3_url in context to llm_reply_to_text_v2
-        sf_context = get_pending_sf_context(user_phone)
+        # 4. Pass s3_url and sf_id in context to llm_reply_to_text_v2
         context = {
             "s3_url": s3_url,
-            "lead_id": sf_context.get("sf_id") if sf_context else ""
+            "lead_id": sf_id or ""
         }
         print(f"Adding background task: llm_reply_to_text_v2 with context: {context}")
         background_tasks.add_task(
