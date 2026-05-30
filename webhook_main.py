@@ -76,88 +76,53 @@ def _process_incoming_messages(
     incoming_phone_id: Optional[str],
     background_tasks: BackgroundTasks,
 ) -> int:
-    import asyncio
+    from external_api_service import ExternalApiService
+    import requests
+    import mimetypes
     handled_messages = 0
     messages = change.get("messages") or []
     print(f"Processing {len(messages)} incoming messages...")
-    from conversation_store import _get_conversations_collection
-    from conversation_store import find_sf_id_by_context_id
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
-        wa_id = user_phone
-        user_id = message.get("from_user_id")
-        print(f"User phone: {user_phone}, wa_id: {wa_id}, user_id: {user_id}")
         incoming_message_id = message.get("id")
-        print(f"Incoming message ID: {incoming_message_id}")
         user_message, media_id, kind = _extract_user_message(message)
         print(f"Extracted user_message: {user_message}")
         print(f"Extracted media_id: {media_id}")
         print(f"Detected kind: {kind}")
 
-        # 2. Extract reply_to from message context
-        reply_to = message.get("context", {}).get("id") or ""
-        print(f"Reply_to: {reply_to}")
+        reply_text = None
+        try:
+            if kind is None:  # Text
+                reply_text = ExternalApiService.send_text(user_message, incoming_message_id, user_phone)
+            elif kind in {"image", "audio"} and media_id:
+                # Download media from WhatsApp
+                from media_store import _fetch_media_download_url, _download_media_bytes
+                media_url = _fetch_media_download_url(media_id)
+                if not media_url:
+                    log_failure(source="media_download", error="Failed to fetch media URL", phone=user_phone, message_id=incoming_message_id)
+                    reply_text = "Sorry, your media could not be processed."
+                else:
+                    media_bytes, content_type = _download_media_bytes(media_url)
+                    if not media_bytes or not content_type:
+                        log_failure(source="media_download", error="Failed to download media bytes", phone=user_phone, message_id=incoming_message_id)
+                        reply_text = "Sorry, your media could not be processed."
+                    else:
+                        ext = mimetypes.guess_extension(content_type) or (".jpg" if kind=="image" else ".ogg")
+                        filename = f"{media_id}{ext}"
+                        reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
+            else:
+                reply_text = "Sorry, this message type is not supported."
+        except Exception as exc:
+            log_failure(source="external_api", error=str(exc), phone=user_phone, message_id=incoming_message_id)
+            reply_text = "Sorry, I am unable to process your request right now. Please try again later."
 
-        # 3. Match reply_to (context.id) to previous message_id in conversation using wa_id/user_id
-        sf_id = None
-        if reply_to:
-            sf_id = find_sf_id_by_context_id(user_phone, reply_to, wa_id=wa_id, user_id=user_id)
-        else:
-            print("No reply_to context found in message.")
-
-        print(f"Mapped sf_id for this message: {sf_id}")
-
-        s3_url = ""
-        s3_detail = None
-        if kind in {"audio", "image"} and media_id:
-            print(f"Uploading media to S3: media_id={media_id}, kind={kind}")
-            s3_detail = upload_whatsapp_media_to_s3(
-                media_id,
-                kind,
-                incoming_message_id,
-                user_phone,
-            )
-            print(f"S3 upload result: {s3_detail}")
-            if s3_detail and s3_detail.get("bucket") and s3_detail.get("key"):
-                s3_url = f"s3://{s3_detail['bucket']}/{s3_detail['key']}"
-                print(f"S3 URL: {s3_url}")
-
+        # Send reply to WhatsApp
+        from webhook_utils import send_message_async
+        import asyncio
+        loop = asyncio.get_event_loop()
+        loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later."))
         handled_messages += 1
-        payload = {
-            "kind": kind or "text",
-            "text": user_message,
-            "media_id": media_id,
-            "phone_number_id": incoming_phone_id,
-            "raw_message": message,
-        }
-        if s3_detail:
-            payload["s3_detail"] = s3_detail
-        print(f"Logging incoming message event: {payload}")
-        # log_event(
-        #     event_type="incoming_message",
-        #     direction="incoming",
-        #     phone=user_phone,
-        #     message_id=incoming_message_id,
-        #     payload=payload,
-        # )
-
-        # 4. Pass s3_url and sf_id in context to llm_reply_to_text_v2
-        context = {
-            "s3_url": s3_url,
-            "lead_id": sf_id or "",
-             "reply_id": reply_to or ""
-        }
-        print(f"Adding background task: llm_reply_to_text_v2 with context: {context}")
-        background_tasks.add_task(
-            llm_reply_to_text_v2,
-            user_message,
-            user_phone,
-            media_id,
-            kind,
-            incoming_message_id,
-            context,
-        )
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
 

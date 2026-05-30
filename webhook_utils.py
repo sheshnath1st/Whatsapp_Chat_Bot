@@ -698,7 +698,7 @@ async def _handle_audio_event_flow(
     sf_context: dict,
 ):
     """Flow: Audio → Transcription → Event extraction → Salesforce update"""
-
+    isUpdate = False
     reply_id = sf_context.get("reply_id")
     sf_id = None
     if reply_id:
@@ -814,6 +814,7 @@ async def _handle_audio_event_flow(
             sf_id,
             sf_update_payload
         )
+        isUpdate = True
         # Store mapping for future replies
         if sf_result and sf_result.get("ok"):
             store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
@@ -826,6 +827,7 @@ async def _handle_audio_event_flow(
         )
         sf_id = (sf_result or {}).get("salesforce_id")
         if sf_id:
+            isUpdate = False
             store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
 
     # --- Save to MongoDB ---
@@ -881,9 +883,9 @@ async def _handle_audio_event_flow(
                 event_summary += f"\nSchedule Date: {meeting_datetime}"
 
     sf_status = (
-        f"Salesforce updated (ID: {sf_id})"
+        f"Salesforce {'updated' if isUpdate else 'created'} (ID: {sf_id})"
         if (sf_result or {}).get("ok")
-        else f"Salesforce update failed (ID: {sf_id})"
+        else f"Salesforce {'update' if isUpdate else 'creation'} failed (ID: {sf_id})"
     )
 
     reply = (
@@ -897,32 +899,6 @@ async def _handle_audio_event_flow(
     send_result = await loop.run_in_executor(None, send_message, user_phone, reply, sf_id, sf_update_payload)
     print("Message sent successfully on handle audio:", send_result)
     # --- Logging ---
-    log_event(
-        event_type="outgoing_message",
-        direction="outgoing",
-        phone=user_phone,
-        message_id=(send_result or {}).get("message_id"),
-        related_message_id=incoming_message_id,
-        payload={
-            "kind": "audio_event",
-            "sf_id": sf_id,
-            "transcript": normalized_transcript,
-            "event": event,
-            "sf_result": sf_result,
-        },
-    )
-
-    log_event(
-        event_type="salesforce_sync",
-        direction="system",
-        phone=user_phone,
-        related_message_id=incoming_message_id,
-        payload={
-            "sf_id": sf_id,
-            "sf_update_payload": sf_update_payload,
-            "sf_result": sf_result,
-        },
-    )
     store_reply_mapping(sf_id, incoming_message_id, sf_update_payload)
     # --- Clear context ---
     # clear_pending_sf_context(user_phone)
