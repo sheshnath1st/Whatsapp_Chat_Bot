@@ -74,7 +74,7 @@ class ExternalApiService:
                     else {"reply_message": resp.text}
                 )
 
-                return api_data
+                return api_data.get("reply_message") or resp.text
 
             logger.error(f"API error: {resp.status_code} {resp.text}")
             return None
