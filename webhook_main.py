@@ -95,7 +95,7 @@ def _process_incoming_messages(
         try:
             if kind is None:  # Text
                 reply_text = ExternalApiService.send_text(user_message, incoming_message_id, user_phone)
-            elif kind in {"image", "audio"} and media_id:
+            elif kind in {"image"} and media_id:
                 # Download media from WhatsApp
                 from media_store import _fetch_media_download_url, _download_media_bytes
                 media_url = _fetch_media_download_url(media_id)
@@ -110,7 +110,9 @@ def _process_incoming_messages(
                     else:
                         ext = mimetypes.guess_extension(content_type) or (".jpg" if kind=="image" else ".ogg")
                         filename = f"{media_id}{ext}"
-                        reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
+                        # reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
+                        reply_text = ExternalApiService.send_media(media_bytes=media_bytes,filename=filename,mimetype=content_type,message_id=incoming_message_id,phone_number=user_phone,raw_message=user_message
+)
             else:
                 reply_text = "Sorry, this message type is not supported."
         except Exception as exc:
