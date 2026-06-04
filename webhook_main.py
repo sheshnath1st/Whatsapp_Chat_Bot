@@ -111,8 +111,8 @@ def _process_incoming_messages(
                         ext = mimetypes.guess_extension(content_type) or (".jpg" if kind=="image" else ".ogg")
                         filename = f"{media_id}{ext}"
                         # reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
-                        reply_text = ExternalApiService.send_media(media_bytes=media_bytes,filename=filename,mimetype=content_type,message_id=incoming_message_id,phone_number=user_phone,raw_message=user_message
-)
+                        reply_text = ExternalApiService.send_media(media_bytes=media_bytes,filename=filename,mimetype=content_type,message_id=incoming_message_id,phone_number=user_phone,raw_message=user_message)
+                        print(f"Received reply from API for media message: {reply_text}")
             else:
                 reply_text = "Sorry, this message type is not supported."
         except Exception as exc:
