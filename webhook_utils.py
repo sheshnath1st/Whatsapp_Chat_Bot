@@ -293,7 +293,7 @@ def _send_message_once(payload: dict, headers: dict) -> dict:
     }
 
 
-def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dict = None):
+def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dict = None,reply_to_message_id: str = None):
     print(f"Preparing to send message to {to}: {text}")
     if not text:
         print("Error: Message text is empty.")
@@ -311,6 +311,12 @@ def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dic
         "type": "text",
         "text": {"body": text}
     }
+
+    if reply_to_message_id:
+        payload["context"] = {
+            "message_id": reply_to_message_id
+        }
+
 
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -346,9 +352,9 @@ def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dic
 
 
 
-async def send_message_async(user_phone: str, message: str):
+async def send_message_async(user_phone: str, message: str, reply_to_message_id: str = None):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, send_message, user_phone, message)
+    return await loop.run_in_executor(None, send_message, user_phone, message, reply_to_message_id = reply_to_message_id)
 
 
 
@@ -723,7 +729,8 @@ async def _handle_audio_event_flow(
         print(f"[Flow1] audio_event endpoint error: {response.status_code}")
         result = await send_message_async(
             user_phone,
-            "Could not process your voice message. Please try again."
+            "Could not process your voice message. Please try again.",
+            incoming_message_id
         )
         if result.get("message_id"):
             store_reply_mapping(sf_id, result["message_id"], sf_update_payload)
@@ -1326,7 +1333,7 @@ async def llm_reply_to_text_v2(
                     related_message_id=incoming_message_id,
                     payload={"llm_response": response_data},
                 )
-                result = await send_message_async(user_phone, "Received empty response from LLM API.")
+                result = await send_message_async(user_phone, "Received empty response from LLM API.",incoming_message_id)
                 print("Send result for empty response notification:", result)
                 # store_sf_message_link(sf_id, result["message_id"], sf_update_payload)
         else:
@@ -1338,7 +1345,7 @@ async def llm_reply_to_text_v2(
                 related_message_id=incoming_message_id,
                 payload={"status_code": response.status_code, "response_data": response_data},
             )
-            await send_message_async(user_phone, "Failed to process message due to an internal server error.")
+            await send_message_async(user_phone, "Failed to process message due to an internal server error.",incoming_message_id)
 
     except Exception as e:
         print("LLM error:", e)
@@ -1350,7 +1357,7 @@ async def llm_reply_to_text_v2(
             payload={"user_input": user_input, "media_id": media_id, "kind": kind},
         )
         try:
-            await send_message_async(user_phone, "Sorry, something went wrong while generating a response.")
+            await send_message_async(user_phone, "Sorry, something went wrong while generating a response.",incoming_message_id)
         except Exception as send_err:
             print("Failed to send error reply:", send_err)
             log_failure(

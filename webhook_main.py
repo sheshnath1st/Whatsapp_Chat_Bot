@@ -123,7 +123,7 @@ def _process_incoming_messages(
         from webhook_utils import send_message_async
         import asyncio
         loop = asyncio.get_event_loop()
-        loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later."))
+        loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
         handled_messages += 1
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
@@ -228,6 +228,16 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 if _is_ignored_phone(incoming_phone_id) or change.get("messages") is None:
                     print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
                     continue
+
+                if _is_ignored_phone(incoming_phone_id):
+                    print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
+                    continue
+
+                # Ignore status updates (sent, delivered, read)
+                if "messages" not in change:
+                    print("❌ Ignored non-message event")
+                    continue
+
                 handled_statuses += _log_status_events(change, incoming_phone_id)
                 handled_messages += _process_incoming_messages(
                     change=change,
