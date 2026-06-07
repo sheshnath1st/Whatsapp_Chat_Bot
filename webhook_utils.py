@@ -326,7 +326,7 @@ def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dic
     print(f"Send URL headers: {headers}")
     print(f"Send URL payload: {payload}")
 
-    for attempt in range(3):
+    for attempt in range(1):
         try:
             send_attempt = _send_message_once(payload, headers)
             if send_attempt["status_code"] == 200:
@@ -352,10 +352,16 @@ def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dic
 
 
 
-async def send_message_async(user_phone: str, message: str, reply_to_message_id: str = None):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, send_message, user_phone, message, reply_to_message_id = reply_to_message_id)
+async def send_message_async(user_phone, message, reply_to_message_id=None):
+    loop = asyncio.get_event_loop()
 
+    return await loop.run_in_executor(
+        None,
+        send_message,
+        user_phone,
+        message,
+        reply_to_message_id
+    )
 
 
         
