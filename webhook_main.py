@@ -137,10 +137,28 @@ def _process_incoming_messages(
         print(f"Extracted user_message: {user_message}")
         print(f"Extracted media_id: {media_id}")
         print(f"Detected kind: {kind}")
-
-        reply_text = None
+        # print(f"Is forwarded message: {is_forwarded_message(message)}")
+        # is_forwarded = is_forwarded_message(message)
+        # print(f"Is forwarded message: {is_forwarded}")
         try:
-            if kind == "text":
+            if message.get("context") is not None:
+                context_object = message.get("context", {})
+                context_from = context_object.get("from", user_phone)
+                context_id = context_object.get("id", incoming_message_id)
+                logger.info(
+                f"Processing forwarded message. "
+                f"phone={user_phone}, "
+                f"message_id={incoming_message_id}"
+                f"context_from={context_from}, "
+                f"context_id={context_id}")
+                api_response = ExternalApiService.send_text(
+                    user_message,
+                    context_id,
+                    context_from
+                )
+                reply_text = api_response
+
+            elif kind == "text":
                 reply_text = ExternalApiService.send_text(
                     user_message,
                     incoming_message_id,
@@ -198,6 +216,14 @@ def _process_incoming_messages(
         handled_messages += 1
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
+
+def is_forwarded_message(message: dict) -> bool:
+    context = message.get("context", {})
+
+    return (
+        context.get("forwarded", False)
+        or context.get("frequently_forwarded", False)
+    )
 
 def build_whatsapp_messages(api_response):
 
