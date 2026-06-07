@@ -31,20 +31,48 @@ from conversation_store import (
     log_failure,
     get_pending_sf_context,
 )
-def _extract_user_message(message: dict) -> tuple[str, Optional[str], Optional[str]]:
-    """Return message text, media_id and detected kind."""
+
+def _extract_user_message(message: dict):
+
     if "text" in message:
-        return (message.get("text", {}).get("body", "").lower(), None, None)
-    if "image" in message:
+        return (
+            message.get("text", {}).get("body", ""),
+            None,
+            "text"
+        )
+
+    elif "image" in message:
         image = message.get("image", {}) or {}
-        return (image.get("caption", ""), image.get("id"), "image")
-    if message.get("audio"):
+        return (
+            image.get("caption", ""),
+            image.get("id"),
+            "image"
+        )
+
+    elif "document" in message:
+        document = message.get("document", {}) or {}
+        return (
+            document.get("caption", ""),
+            document.get("id"),
+            "document"
+        )
+
+    elif "video" in message:
+        video = message.get("video", {}) or {}
+        return (
+            video.get("caption", ""),
+            video.get("id"),
+            "video"
+        )
+
+    elif "audio" in message:
         audio = message.get("audio", {}) or {}
-        return ("", audio.get("id"), "audio")
-    if message.get("contacts"):
-        contacts = message.get("contacts") or []
-        if contacts:
-            return (_contact_to_extraction_text(contacts[0]), None, "contact")
+        return (
+            "",
+            audio.get("id"),
+            "audio"
+        )
+
     return ("", None, None)
 
 
@@ -93,8 +121,15 @@ def _process_incoming_messages(
 
         reply_text = None
         try:
-            if kind is None:  # Text
+            if kind == "text":
+                reply_text = ExternalApiService.send_text(
+                    user_message,
+                    incoming_message_id,
+                    user_phone
+                )
+            elif kind is None:  # Text
                 reply_text = ExternalApiService.send_text(user_message, incoming_message_id, user_phone)
+            # elif kind in {"image", "document", "video", "audio"} and media_id:
             elif kind in {"image"} and media_id:
                 # Download media from WhatsApp
                 from media_store import _fetch_media_download_url, _download_media_bytes
@@ -111,7 +146,14 @@ def _process_incoming_messages(
                         ext = mimetypes.guess_extension(content_type) or (".jpg" if kind=="image" else ".ogg")
                         filename = f"{media_id}{ext}"
                         # reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
-                        reply_text = ExternalApiService.send_media(media_bytes=media_bytes,filename=filename,mimetype=content_type,message_id=incoming_message_id,phone_number=user_phone,raw_message=user_message)
+                        reply_text = ExternalApiService.send_media(
+                            media_bytes=media_bytes,
+                            filename=filename,
+                            mimetype=content_type,
+                            message_id=incoming_message_id,
+                            phone_number=user_phone,
+                            raw_message=user_message
+                        )
                         print(f"Received reply from API for media message: {reply_text}")
             else:
                 reply_text = "Sorry, this message type is not supported."
@@ -120,13 +162,91 @@ def _process_incoming_messages(
             reply_text = "Sorry, I am unable to process your request right now. Please try again later."
 
         # Send reply to WhatsApp
+        reply_messages = build_whatsapp_messages(reply_text)
         from webhook_utils import send_message_async
         import asyncio
         loop = asyncio.get_event_loop()
-        loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
+        for reply_message in reply_messages:
+            loop.create_task(
+                send_message_async(
+                    user_phone,
+                    reply_message,
+                    reply_to_message_id=incoming_message_id
+                )
+            )
+        # loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
+        
         handled_messages += 1
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
+
+def build_whatsapp_messages(api_response):
+
+    matches = api_response.get("matches", [])
+
+    if not matches:
+        return ["❌ No matching buyers found."]
+
+    messages = []
+
+    messages.append(
+        f"🎉 Great News!\n\n"
+        f"We found {len(matches)} potential buyer matches for your property."
+    )
+
+    unique_matches = []
+    seen = set()
+
+    for match in matches:
+
+        buyer = match.get("buy_snapshot", {})
+        broker = match.get("buy_broker", {})
+
+        key = (
+            broker.get("phone"),
+            buyer.get("location"),
+            buyer.get("bhk")
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_matches.append(match)
+
+    for idx, match in enumerate(unique_matches[:10], start=1):
+
+        buyer = match.get("buy_snapshot", {})
+        broker = match.get("buy_broker", {})
+
+        bhk = buyer.get("bhk", "")
+        location = buyer.get("location", "N/A")
+
+        min_price = buyer.get("price_min_aed")
+        max_price = buyer.get("price_max_aed")
+        exact_price = buyer.get("price_aed")
+
+        if min_price and max_price:
+            budget = f"AED {min_price:,} - {max_price:,}"
+        else:
+            budget = f"AED {exact_price:,}"
+
+        score = int(match.get("score", 0) * 100)
+
+        msg = (
+            f"🎯 Potential Buyer Found\n\n"
+            f"🏠 {bhk}BR {buyer.get('property_type', 'Property').title()}\n"
+            f"📍 {location}\n"
+            f"📐 {buyer.get('sqft') or 'N/A'} sqft\n"
+            f"💰 Budget: {budget}\n\n"
+            f"👤 Broker: {broker.get('name') or 'N/A'}\n"
+            f"📞 {broker.get('phone') or 'N/A'}\n\n"
+            f"⭐ Match Score: {score}%"
+        )
+
+        messages.append(msg)
+
+    return messages
 
 
 def _is_ignored_phone(incoming_phone_id: Optional[str]) -> bool:
