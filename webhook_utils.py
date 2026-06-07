@@ -133,6 +133,7 @@ import json
 import requests
 import httpx
 from datetime import datetime, timezone
+import logging
 
 from dotenv import load_dotenv
 from typing import Optional
@@ -153,6 +154,8 @@ from conversation_store import (
 from utils_helper import resolve_datetime, clean_value, build_salesforce_payload, store_reply_mapping, fetch_sf_id_by_message_id, normalize_numbers
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Prefer ACCESS_TOKEN (used in README); fall back to META_ACCESS_TOKEN for backward compatibility.
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
@@ -279,12 +282,14 @@ def _extract_whatsapp_message_id(response_json: dict) -> Optional[str]:
 
 
 def _send_message_once(payload: dict, headers: dict) -> dict:
+    logger.info("Webhook processed successfully; _send_message_once  payload=%s", payload)
     response = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=15)
     response_json = {}
     try:
         response_json = response.json()
+        logger.info("Webhook processed successfully; _send_message_once  response_json=%s", response_json)
     except Exception:
-        pass
+        logger.error("Failed to parse response as JSON")
     return {
         "status_code": response.status_code,
         "response_json": response_json,
@@ -294,9 +299,9 @@ def _send_message_once(payload: dict, headers: dict) -> dict:
 
 
 def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dict = None,reply_to_message_id: str = None):
-    print(f"Preparing to send message to {to}: {text}")
+    logger.info("Preparing to send message to %s", to)
     if not text:
-        print("Error: Message text is empty.")
+        logger.warning("Error: Message text is empty for phone=%s", to)
         log_failure(
             source="send_message.empty_text",
             error="empty_text",
@@ -322,32 +327,37 @@ def send_message(to: str, text: str, sf_id: str = None, payload_for_mapping: dic
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": JSON_CONTENT_TYPE
     }
-    print(f"Send URL WHATSAPP_API_URL: {WHATSAPP_API_URL}")
-    print(f"Send URL headers: {headers}")
-    print(f"Send URL payload: {payload}")
+    logger.debug("WHATSAPP_API_URL: %s", WHATSAPP_API_URL)
+    logger.debug("Send headers: %s", headers)
+    logger.debug("Send payload: %s", payload)
 
     for attempt in range(1):
         try:
             send_attempt = _send_message_once(payload, headers)
             if send_attempt["status_code"] == 200:
-                print("Message sent successfully:", send_attempt)
+                logger.info("Message sent successfully to %s: %s", to, send_attempt)
                 # Store mapping if sf_id and payload_for_mapping are provided
                 if sf_id and payload_for_mapping:
                     from utils_helper import store_reply_mapping
-                    store_reply_mapping(sf_id, send_attempt["message_id"], payload_for_mapping)
+                    try:
+                        store_reply_mapping(sf_id, send_attempt["message_id"], payload_for_mapping)
+                        logger.debug("Stored reply mapping for sf_id=%s message_id=%s", sf_id, send_attempt["message_id"])
+                    except Exception:
+                        logger.exception("Failed to store reply mapping for sf_id=%s", sf_id)
                 return {
                     "ok": True,
                     "status_code": send_attempt["status_code"],
                     "message_id": send_attempt["message_id"],
                     "response": send_attempt["response_json"],
                 }
-            print(f"Send failed (attempt {attempt + 1}): {send_attempt['response_text']}")
+            logger.warning("Send failed (attempt %d) to %s: %s", attempt + 1, to, send_attempt["response_text"])
         except requests.exceptions.Timeout:
-            print(f"Send timeout (attempt {attempt + 1})")
+            logger.warning("Send timeout (attempt %d) to %s", attempt + 1, to)
         except Exception as exc:
-            print(f"Send error (attempt {attempt + 1}): {exc}")
+            logger.exception("Send error (attempt %d) to %s: %s", attempt + 1, to, exc)
             break  # Non-transient error; don't retry
 
+    logger.error("Failed to send WhatsApp message to %s after attempts", to)
     return {"ok": False, "error": "whatsapp_send_failed"}
 
 

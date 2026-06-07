@@ -8,15 +8,34 @@ from conversation_store import log_event, log_failure
 from media_store import upload_whatsapp_media_to_s3
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+# Ensure logs directory exists and configure rotating file logging
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+log_file_path = os.path.join(LOG_DIR, "app.log")
+
+formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Add console handler if none present
+if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+# Add rotating file handler (5MB per file, keep 5 backups)
+file_handler = RotatingFileHandler(log_file_path, maxBytes=5 * 1024 * 1024, backupCount=5)
+file_handler.setFormatter(formatter)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
@@ -234,7 +253,7 @@ def build_whatsapp_messages(api_response):
         score = int(match.get("score", 0) * 100)
 
         msg = (
-            f"🎯 Potential Buyer Found\n\n"
+            f"🎯 Buyer Match #{idx}\n\n"
             f"🏠 {bhk}BR {buyer.get('property_type', 'Property').title()}\n"
             f"📍 {location}\n"
             f"📐 {buyer.get('sqft') or 'N/A'} sqft\n"
@@ -326,15 +345,18 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
             error=str(exc),
             payload={"detail": "Malformed webhook payload"},
         )
-        return JSONResponse(status_code=200, content={"status": "bad_request"})
+        resp_content = {"status": "bad_request"}
+        logger.info("Webhook request parsing failed; response=%s", resp_content)
+        return JSONResponse(status_code=200, content=resp_content)
 
     try:
-        print("Received webhook data:")
-        print(json.dumps(data, indent=2))
+        logger.info("Received webhook data: %s", json.dumps(data))
         message_data = WhatsAppMessage(**data)
 
         if not message_data.entry:
-            return JSONResponse(status_code=200, content={"status": "no entry"})
+            resp_content = {"status": "no_entry"}
+            logger.info("No entry in webhook payload; response=%s", resp_content)
+            return JSONResponse(status_code=200, content=resp_content)
 
         handled_messages = 0
         handled_statuses = 0
@@ -366,9 +388,18 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 )
 
         if handled_messages == 0 and handled_statuses == 0:
-            return JSONResponse(status_code=200, content={"status": "no_relevant_event"})
+            resp_content = {"status": "no_relevant_event"}
+            logger.info(
+                "Webhook processed but no relevant events; handled_messages=%d handled_statuses=%d response=%s",
+                handled_messages,
+                handled_statuses,
+                resp_content,
+            )
+            return JSONResponse(status_code=200, content=resp_content)
 
-        return JSONResponse(status_code=200, content={"status": "ok"})
+        resp_content = {"status": "ok", "handled_messages": handled_messages, "handled_statuses": handled_statuses}
+        logger.info("Webhook processed successfully; response=%s", resp_content)
+        return JSONResponse(status_code=200, content=resp_content)
 
     except Exception as exc:
         logger.exception("Unhandled error in webhook_handler: %r", exc)
@@ -378,4 +409,6 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
             payload={"webhook_payload": data if isinstance(data, dict) else {}},
         )
         # Always return 200 so Meta does not retry the delivery.
-        return JSONResponse(status_code=200, content={"status": "error"})
+        resp_content = {"status": "error"}
+        logger.info("Webhook handler unhandled exception; response=%s", resp_content)
+        return JSONResponse(status_code=200, content=resp_content)
