@@ -370,6 +370,8 @@ async def send_message_async(user_phone, message, reply_to_message_id=None):
         send_message,
         user_phone,
         message,
+        None,  # sf_id not needed for async flow
+        None,  # payload_for_mapping not needed for async flow
         reply_to_message_id
     )
 
