@@ -379,7 +379,8 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 if "messages" not in change:
                     print("❌ Ignored non-message event")
                     continue
-
+                print(f"✅ Processing webhook for phone_number_id: {incoming_phone_id}")
+                print(f"Webhook change content: {json.dumps(change)}")
                 handled_statuses += _log_status_events(change, incoming_phone_id)
                 handled_messages += _process_incoming_messages(
                     change=change,
