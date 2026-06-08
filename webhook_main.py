@@ -198,7 +198,17 @@ def _process_incoming_messages(
             reply_text = "Sorry, I am unable to process your request right now. Please try again later."
 
         # Send reply to WhatsApp
-        reply_messages = build_whatsapp_messages(reply_text)
+        if reply_text is None:
+            reply_messages = [{
+                "phone_number": user_phone,
+                "message_id": incoming_message_id,
+                "text": (
+                    "⚠️ Unable to process your request right now. "
+                    "Please try again later."
+                )
+            }]
+        else:
+            reply_messages = build_whatsapp_messages(reply_text)
         from webhook_utils import send_message_async
         import asyncio
         loop = asyncio.get_event_loop()
