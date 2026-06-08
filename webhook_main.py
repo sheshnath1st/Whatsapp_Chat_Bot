@@ -51,6 +51,38 @@ from conversation_store import (
     log_failure,
     get_pending_sf_context,
 )
+import threading
+
+# In-memory caches. Replace with Redis or persistent store in production.
+PROCESSED_MESSAGES = set()
+PROCESSED_MESSAGES_LOCK = threading.Lock()
+
+BOT_MESSAGE_IDS = set()
+BOT_MESSAGE_IDS_LOCK = threading.Lock()
+
+def _mark_processed(message_id: str):
+    if not message_id:
+        return
+    with PROCESSED_MESSAGES_LOCK:
+        PROCESSED_MESSAGES.add(message_id)
+
+def _is_processed(message_id: str) -> bool:
+    if not message_id:
+        return False
+    with PROCESSED_MESSAGES_LOCK:
+        return message_id in PROCESSED_MESSAGES
+
+def _mark_bot_message(message_id: str):
+    if not message_id:
+        return
+    with BOT_MESSAGE_IDS_LOCK:
+        BOT_MESSAGE_IDS.add(message_id)
+
+def _is_bot_message(message_id: str) -> bool:
+    if not message_id:
+        return False
+    with BOT_MESSAGE_IDS_LOCK:
+        return message_id in BOT_MESSAGE_IDS
 
 def _extract_user_message(message: dict):
 
@@ -128,60 +160,67 @@ def _process_incoming_messages(
     from external_api_service import ExternalApiService
     import requests
     import mimetypes
+
     handled_messages = 0
     messages = change.get("messages") or []
     print(f"Processing {len(messages)} incoming messages... incoming_phone_id={incoming_phone_id} business_phone_number={business_phone_number}")
+
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
         incoming_message_id = message.get("id")
+
         print(f"Message from={user_phone} id={incoming_message_id} raw_message={json.dumps(message)}")
 
+        # Duplicate protection
+        if _is_processed(incoming_message_id):
+            print(f"Skipping already processed incoming id={incoming_message_id}")
+            continue
+
+        # Ignore webhooks that notify about outgoing messages from the business phone
         if business_phone_number and user_phone == business_phone_number:
-            print(f"Ignoring outgoing business message webhook event for phone {business_phone_number}")
-            logger.info(
-                "Ignoring outgoing business message webhook event for phone %s",
-                business_phone_number,
-            )
+            print(f"Ignoring webhook for outgoing business message from {business_phone_number}")
+            _mark_processed(incoming_message_id)
             continue
 
         user_message, media_id, kind = _extract_user_message(message)
         print(f"Extracted user_message: {user_message}")
         print(f"Extracted media_id: {media_id}")
         print(f"Detected kind: {kind}")
-        # print(f"Is forwarded message: {is_forwarded_message(message)}")
-        # is_forwarded = is_forwarded_message(message)
-        # print(f"Is forwarded message: {is_forwarded}")
+
+        context = message.get("context") or {}
+        context_id = context.get("id")
+        forwarded_flag = bool(context.get("forwarded", False) or context.get("frequently_forwarded", False))
+        print(f"context_id={context_id} forwarded={forwarded_flag}")
+
+        # Ignore bot-like content reposted by users
+        lowered = (user_message or "").lower()
+        if any(phrase in lowered for phrase in ["msgflowx response", "strong match found", "buyer match #"]):
+            print(f"Ignoring reposted bot content for incoming id={incoming_message_id} text={user_message}")
+            _mark_processed(incoming_message_id)
+            continue
+
         try:
-            if message.get("context") is not None and not message["context"].get("forwarded", False):
-                context_object = message.get("context", {})
-                context_from = context_object.get("from", user_phone)
-                context_id = context_object.get("id", incoming_message_id)
-                print(f"Forwarded/context message detected from={user_phone} context_from={context_from} context_id={context_id}")
-                logger.info(
-                f"Processing forwarded message. "
-                f"phone={user_phone}, "
-                f"message_id={incoming_message_id}"
-                f"context_from={context_from}, "
-                f"context_id={context_id}")
-                ExternalApiService.update_message_tag(
-                    message_id=context_id,
-                    tag=context_from
-                )
+            # Reply to a bot message -> call update_message_tag and stop processing (only if not forwarded)
+            if context_id and not forwarded_flag and _is_bot_message(context_id):
+                print(f"Incoming message is a reply to bot message: context_id={context_id} incoming_id={incoming_message_id}")
+                try:
+                    api_result = ExternalApiService.update_message_tag(message_id=context_id, tag=(user_message or ""))
+                    print(f"update_message_tag result for context_id={context_id}: {api_result}")
+                except Exception as exc:
+                    print(f"Error calling update_message_tag: {exc}")
+                    log_failure(source="external_api.update_message_tag", error=str(exc), phone=user_phone, message_id=incoming_message_id)
+                _mark_processed(incoming_message_id)
                 handled_messages += 1
                 continue
 
-            elif kind == "text":
-                reply_text = ExternalApiService.send_text(
-                    user_message,
-                    incoming_message_id,
-                    user_phone
-                )
-            elif kind is None:  # Text
+            # Normal processing: forwarded messages fall through here as normal inquiries
+            if kind == "text" or kind is None:
+                print(f"Calling ExternalApiService.send_text for incoming_id={incoming_message_id}")
                 reply_text = ExternalApiService.send_text(user_message, incoming_message_id, user_phone)
-            # elif kind in {"image", "document", "video", "audio"} and media_id:
+                print(f"ExternalApiService.send_text returned: {reply_text}")
+
             elif kind in {"image"} and media_id:
-                # Download media from WhatsApp
                 from media_store import _fetch_media_download_url, _download_media_bytes
                 media_url = _fetch_media_download_url(media_id)
                 if not media_url:
@@ -193,56 +232,66 @@ def _process_incoming_messages(
                         log_failure(source="media_download", error="Failed to download media bytes", phone=user_phone, message_id=incoming_message_id)
                         reply_text = "Sorry, your media could not be processed."
                     else:
-                        ext = mimetypes.guess_extension(content_type) or (".jpg" if kind=="image" else ".ogg")
+                        ext = mimetypes.guess_extension(content_type) or (".jpg" if kind == "image" else ".bin")
                         filename = f"{media_id}{ext}"
-                        # reply_text = ExternalApiService.send_media(media_bytes, filename, content_type, incoming_message_id, user_phone, kind)
                         reply_text = ExternalApiService.send_media(
                             media_bytes=media_bytes,
                             filename=filename,
                             mimetype=content_type,
                             message_id=incoming_message_id,
                             phone_number=user_phone,
-                            raw_message=user_message
+                            raw_message=user_message,
                         )
-                        print(f"Received reply from API for media message: {reply_text}")
+                        print(f"ExternalApiService.send_media returned: {reply_text}")
+
             else:
                 reply_text = "Sorry, this message type is not supported."
+
         except Exception as exc:
             log_failure(source="external_api", error=str(exc), phone=user_phone, message_id=incoming_message_id)
             reply_text = "Sorry, I am unable to process your request right now. Please try again later."
 
-        # Send reply to WhatsApp
+        # Build WhatsApp reply messages
         if reply_text is None:
-            print(f"Reply text is None for message id={incoming_message_id}, building fallback response")
             reply_messages = [{
                 "phone_number": user_phone,
                 "message_id": incoming_message_id,
                 "text": (
                     "⚠️ Unable to process your request right now. "
                     "Please try again later."
-                )
+                ),
             }]
         else:
-            print(f"API returned reply_text: {reply_text}")
             reply_messages = build_whatsapp_messages(reply_text)
-            print(f"Built {len(reply_messages)} reply_messages from API response")
+
+        # Async send wrapper to store outgoing message ids
         from webhook_utils import send_message_async
         import asyncio
+
+        async def _send_and_store(user_phone_arg, text_arg, reply_to_id_arg=None):
+            try:
+                resp = await send_message_async(user_phone_arg, text_arg, reply_to_id_arg)
+                print(f"send_message_async result for to={user_phone_arg} resp={resp}")
+                if isinstance(resp, dict) and resp.get("ok") and resp.get("message_id"):
+                    _mark_bot_message(resp.get("message_id"))
+                    print(f"Stored outgoing bot message id={resp.get('message_id')}")
+                else:
+                    print(f"No outgoing message id returned or send failed for to={user_phone_arg} resp={resp}")
+            except Exception as exc:
+                print(f"Exception while sending message to {user_phone_arg}: {exc}")
+
         loop = asyncio.get_event_loop()
         for reply_message in reply_messages:
             target_phone = reply_message.get("phone_number") or user_phone
             target_text = reply_message.get("text")
             target_message_id = reply_message.get("message_id") or incoming_message_id
             print(f"Scheduling reply to {target_phone} message_id={target_message_id} text={target_text}")
-            loop.create_task(
-                send_message_async(
-                    target_phone,
-                    target_text,
-                    reply_to_message_id=target_message_id
-                )
-            )
-        # loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
+            loop.create_task(_send_and_store(target_phone, target_text, target_message_id))
+
+        # Mark processed to prevent duplicate processing
+        _mark_processed(incoming_message_id)
         handled_messages += 1
+
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
 
