@@ -135,9 +135,6 @@ def _process_incoming_messages(
         user_phone = message.get("from")
         incoming_message_id = message.get("id")
 
-        if message.get("from") == metadata.get("display_phone_number"):
-            continue
-
         user_message, media_id, kind = _extract_user_message(message)
         print(f"Extracted user_message: {user_message}")
         print(f"Extracted media_id: {media_id}")
