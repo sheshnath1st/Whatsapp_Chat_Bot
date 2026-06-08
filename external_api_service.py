@@ -4,6 +4,7 @@ import tempfile
 import logging
 
 API_URL = os.getenv("EXTERNAL_API_URL", "https://precision-fifth-headband.ngrok-free.dev/ingest/whatsapp")
+UPDATE_API_URL = os.getenv("UPDATE_API_URL", "https://precision-fifth-headband.ngrok-free.dev/ingest/update")
 API_KEY = os.getenv("EXTERNAL_API_KEY", "your_api_key_here")
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,51 @@ class ExternalApiService:
 
         except Exception as exc:
             logger.exception(f"Failed to call API: {exc}")
+            return None
+
+    @staticmethod
+    def update_message_tag(message_id, tag):
+
+        files = {
+            "message_id": (None, str(message_id)),
+            "tag": (None, str(tag))
+        }
+
+        headers = {
+            "X-API-Key": API_KEY
+        }
+
+        try:
+            logger.info(
+                f"Updating message tag: "
+                f"message_id={message_id}, "
+                f"tag={tag}"
+            )
+
+            resp = requests.post(
+                UPDATE_API_URL,
+                headers=headers,
+                files=files,
+                timeout=30
+            )
+
+            logger.info(f"Update status: {resp.status_code}")
+            logger.info(f"Update response: {resp.text}")
+
+            if resp.status_code == 200:
+                return resp.json()
+
+            logger.error(
+                f"Update API error: "
+                f"{resp.status_code} {resp.text}"
+            )
+
+            return None
+
+        except Exception as exc:
+            logger.exception(
+                f"Failed to update message tag: {exc}"
+            )
             return None
 
     @staticmethod

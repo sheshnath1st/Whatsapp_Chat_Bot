@@ -141,7 +141,7 @@ def _process_incoming_messages(
         # is_forwarded = is_forwarded_message(message)
         # print(f"Is forwarded message: {is_forwarded}")
         try:
-            if message.get("context") is not None:
+            if message.get("context") is not None and not message["context"].get("forwarded", False):
                 context_object = message.get("context", {})
                 context_from = context_object.get("from", user_phone)
                 context_id = context_object.get("id", incoming_message_id)
@@ -151,10 +151,9 @@ def _process_incoming_messages(
                 f"message_id={incoming_message_id}"
                 f"context_from={context_from}, "
                 f"context_id={context_id}")
-                api_response = ExternalApiService.send_text(
-                    user_message,
-                    context_id,
-                    context_from
+                api_response = ExternalApiService.update_message_tag(
+                    message_id=context_id,
+                    tag=context_from
                 )
                 reply_text = api_response
 
@@ -206,13 +205,14 @@ def _process_incoming_messages(
         for reply_message in reply_messages:
             loop.create_task(
                 send_message_async(
-                    user_phone,
-                    reply_message,
-                    reply_to_message_id=incoming_message_id
+                    reply_message.get("phone_number") or user_phone,
+                    reply_message.get("text"),
+                    reply_to_message_id=
+                        reply_message.get("message_id")
+                        or incoming_message_id
                 )
             )
         # loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
-        
         handled_messages += 1
     print(f"Total handled messages: {handled_messages}")
     return handled_messages
@@ -230,66 +230,35 @@ def build_whatsapp_messages(api_response):
     matches = api_response.get("matches", [])
 
     if not matches:
-        return ["❌ No matching buyers found."]
+        return [{
+            "phone_number": api_response.get("phone_number"),
+            "message_id": api_response.get("message_id"),
+            "text": api_response.get(
+                "reply_message",
+                "❌ No matching buyers found."
+            )
+        }]
 
     messages = []
 
-    messages.append(
-        f"🎉 Great News!\n\n"
-        f"We found {len(matches)} potential buyer matches for your property."
-    )
-
-    unique_matches = []
-    seen = set()
-
-    for match in matches:
+    for idx, match in enumerate(matches[:10], start=1):
 
         buyer = match.get("buy_snapshot", {})
         broker = match.get("buy_broker", {})
-
-        key = (
-            broker.get("phone"),
-            buyer.get("location"),
-            buyer.get("bhk")
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_matches.append(match)
-
-    for idx, match in enumerate(unique_matches[:10], start=1):
-
-        buyer = match.get("buy_snapshot", {})
-        broker = match.get("buy_broker", {})
-
-        bhk = buyer.get("bhk", "")
-        location = buyer.get("location", "N/A")
-
-        min_price = buyer.get("price_min_aed")
-        max_price = buyer.get("price_max_aed")
-        exact_price = buyer.get("price_aed")
-
-        if min_price and max_price:
-            budget = f"AED {min_price:,} - {max_price:,}"
-        else:
-            budget = f"AED {exact_price:,}"
-
-        score = int(match.get("score", 0) * 100)
 
         msg = (
             f"🎯 Buyer Match #{idx}\n\n"
-            f"🏠 {bhk}BR {buyer.get('property_type', 'Property').title()}\n"
-            f"📍 {location}\n"
-            f"📐 {buyer.get('sqft') or 'N/A'} sqft\n"
-            f"💰 Budget: {budget}\n\n"
-            f"👤 Broker: {broker.get('name') or 'N/A'}\n"
-            f"📞 {broker.get('phone') or 'N/A'}\n\n"
-            f"⭐ Match Score: {score}%"
+            f"🏠 {buyer.get('bhk')}BR "
+            f"{buyer.get('property_type', 'Property').title()}\n"
+            f"📍 {buyer.get('location', 'N/A')}\n"
+            f"📞 {broker.get('phone', 'N/A')}"
         )
 
-        messages.append(msg)
+        messages.append({
+            "phone_number": match.get("phone_number"),
+            "message_id": match.get("message_id"),
+            "text": msg
+        })
 
     return messages
 
