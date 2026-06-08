@@ -33,7 +33,7 @@ class ExternalApiService:
                 API_URL,
                 headers=headers,
                 files=files,
-                timeout=30
+                timeout=120
             )
 
             logger.info(f"API response: {resp.status_code}")
@@ -78,7 +78,7 @@ class ExternalApiService:
                 UPDATE_API_URL,
                 headers=headers,
                 files=files,
-                timeout=30
+                timeout=120
             )
 
             logger.info(f"Update status: {resp.status_code}")
@@ -126,7 +126,7 @@ class ExternalApiService:
                 API_URL,
                 headers=headers,
                 files=files,
-                timeout=60
+                timeout=120
             )
 
             logger.info(f"Status: {resp.status_code}")
