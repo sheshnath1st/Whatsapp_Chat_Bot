@@ -122,6 +122,7 @@ def _process_incoming_messages(
     *,
     change: dict,
     incoming_phone_id: Optional[str],
+    business_phone_number: Optional[str],
     background_tasks: BackgroundTasks,
 ) -> int:
     from external_api_service import ExternalApiService
@@ -129,11 +130,20 @@ def _process_incoming_messages(
     import mimetypes
     handled_messages = 0
     messages = change.get("messages") or []
-    print(f"Processing {len(messages)} incoming messages...")
+    print(f"Processing {len(messages)} incoming messages... incoming_phone_id={incoming_phone_id} business_phone_number={business_phone_number}")
     for idx, message in enumerate(messages):
         print(f"\n--- Handling message {idx+1}/{len(messages)} ---")
         user_phone = message.get("from")
         incoming_message_id = message.get("id")
+        print(f"Message from={user_phone} id={incoming_message_id} raw_message={json.dumps(message)}")
+
+        if business_phone_number and user_phone == business_phone_number:
+            print(f"Ignoring outgoing business message webhook event for phone {business_phone_number}")
+            logger.info(
+                "Ignoring outgoing business message webhook event for phone %s",
+                business_phone_number,
+            )
+            continue
 
         user_message, media_id, kind = _extract_user_message(message)
         print(f"Extracted user_message: {user_message}")
@@ -147,18 +157,19 @@ def _process_incoming_messages(
                 context_object = message.get("context", {})
                 context_from = context_object.get("from", user_phone)
                 context_id = context_object.get("id", incoming_message_id)
+                print(f"Forwarded/context message detected from={user_phone} context_from={context_from} context_id={context_id}")
                 logger.info(
                 f"Processing forwarded message. "
                 f"phone={user_phone}, "
                 f"message_id={incoming_message_id}"
                 f"context_from={context_from}, "
                 f"context_id={context_id}")
-                api_response = ExternalApiService.update_message_tag(
+                ExternalApiService.update_message_tag(
                     message_id=context_id,
                     tag=context_from
                 )
-                reply_text = api_response
-                return handled_messages
+                handled_messages += 1
+                continue
 
             elif kind == "text":
                 reply_text = ExternalApiService.send_text(
@@ -202,6 +213,7 @@ def _process_incoming_messages(
 
         # Send reply to WhatsApp
         if reply_text is None:
+            print(f"Reply text is None for message id={incoming_message_id}, building fallback response")
             reply_messages = [{
                 "phone_number": user_phone,
                 "message_id": incoming_message_id,
@@ -211,18 +223,22 @@ def _process_incoming_messages(
                 )
             }]
         else:
+            print(f"API returned reply_text: {reply_text}")
             reply_messages = build_whatsapp_messages(reply_text)
+            print(f"Built {len(reply_messages)} reply_messages from API response")
         from webhook_utils import send_message_async
         import asyncio
         loop = asyncio.get_event_loop()
         for reply_message in reply_messages:
+            target_phone = reply_message.get("phone_number") or user_phone
+            target_text = reply_message.get("text")
+            target_message_id = reply_message.get("message_id") or incoming_message_id
+            print(f"Scheduling reply to {target_phone} message_id={target_message_id} text={target_text}")
             loop.create_task(
                 send_message_async(
-                    reply_message.get("phone_number") or user_phone,
-                    reply_message.get("text"),
-                    reply_to_message_id=
-                        reply_message.get("message_id")
-                        or incoming_message_id
+                    target_phone,
+                    target_text,
+                    reply_to_message_id=target_message_id
                 )
             )
         # loop.create_task(send_message_async(user_phone, reply_text or "Sorry, I am unable to process your request right now. Please try again later.",reply_to_message_id = incoming_message_id))
@@ -374,12 +390,10 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 change = change_item.get("value", {})
                 metadata = change.get("metadata", {})
                 incoming_phone_id = metadata.get("phone_number_id")
+                business_phone_number = metadata.get("display_phone_number")
+                print(f"Received change metadata: incoming_phone_id={incoming_phone_id} display_phone_number={business_phone_number} metadata={json.dumps(metadata)}")
 
                 if _is_ignored_phone(incoming_phone_id) or change.get("messages") is None:
-                    print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
-                    continue
-
-                if _is_ignored_phone(incoming_phone_id):
                     print(f"❌ Ignored webhook for phone_number_id: {incoming_phone_id}")
                     continue
 
@@ -393,6 +407,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 handled_messages += _process_incoming_messages(
                     change=change,
                     incoming_phone_id=incoming_phone_id,
+                    business_phone_number=business_phone_number,
                     background_tasks=background_tasks,
                 )
 
