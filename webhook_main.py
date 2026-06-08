@@ -156,6 +156,7 @@ def _process_incoming_messages(
                     tag=context_from
                 )
                 reply_text = api_response
+                return handled_messages
 
             elif kind == "text":
                 reply_text = ExternalApiService.send_text(
