@@ -50,7 +50,9 @@ from conversation_store import (
     log_event,
     log_failure,
     get_pending_sf_context,
+    upsert_conversation_message,
 )
+from datetime import datetime, timezone
 import threading
 
 # In-memory caches. Replace with Redis or persistent store in production.
@@ -326,16 +328,67 @@ def build_whatsapp_messages(api_response):
 
         msg = (
             f"🎯 Buyer Match #{idx}\n\n"
-            f"🏠 {buyer.get('bhk')}BR "
+            f"🏠 {buyer.get('bhk') or 0}BR "
             f"{buyer.get('property_type', 'Property').title()}\n"
             f"📍 {buyer.get('location', 'N/A')}\n"
             f"📞 {broker.get('phone', 'N/A')}"
         )
 
+        # Extract structured match data to store/forward
+        def _extract_match_structured(m: dict) -> dict:
+            sell_snapshot = (m.get("sell_snapshot") or {}) if isinstance(m.get("sell_snapshot"), dict) else {}
+            sell_broker = (m.get("sell_broker") or {}) if isinstance(m.get("sell_broker"), dict) else {}
+            return {
+                "match_type": m.get("match_type"),
+                "match_id": m.get("match_id"),
+                "buy_id": m.get("buy_id"),
+                "sell_id": m.get("sell_id"),
+                "score": m.get("score"),
+                "reasons": m.get("reasons") or [],
+                "skipped": m.get("skipped") or [],
+                "sell_broker": {
+                    "name": sell_broker.get("name"),
+                    "phone": sell_broker.get("phone"),
+                    "company": sell_broker.get("company"),
+                },
+                "sell_snapshot": {
+                    "property_type": sell_snapshot.get("property_type"),
+                    "bhk": sell_snapshot.get("bhk"),
+                    "price_aed": sell_snapshot.get("price_aed"),
+                    "location": sell_snapshot.get("location"),
+                    "wa_message_id": sell_snapshot.get("wa_message_id"),
+                    "wa_phone_number": sell_snapshot.get("wa_phone_number"),
+                    "wa_received_at": sell_snapshot.get("wa_received_at"),
+                    "customer_message": sell_snapshot.get("customer_message"),
+                },
+                "message_id": m.get("message_id"),
+                "phone_number": m.get("phone_number"),
+                "matched_listing_received_at": m.get("matched_listing_received_at"),
+            }
+
+        structured = _extract_match_structured(match)
+
+        # Persist the bot match into conversation thread (best-effort)
+        try:
+            message_doc = {
+                "message_id": structured.get("message_id") or f"bot_match_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
+                "type": "bot_match",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "text": msg,
+                "match": structured,
+            }
+            if structured.get("phone_number"):
+                upsert_conversation_message(structured.get("phone_number"), message_doc)
+            else:
+                # fallback: attach to buyer's phone if present in api_response
+                upsert_conversation_message(api_response.get("phone_number") or "unknown", message_doc)
+        except Exception as exc:
+            print(f"Failed to persist match to conversation store: {exc}")
+
         messages.append({
             "phone_number": match.get("phone_number"),
             "message_id": match.get("message_id"),
-            "text": msg
+            "text": msg,
         })
 
     return messages
