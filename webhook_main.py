@@ -275,8 +275,11 @@ def _process_incoming_messages(
                 resp = await send_message_async(user_phone_arg, text_arg, reply_to_id_arg)
                 print(f"send_message_async result for to={user_phone_arg} resp={resp}")
                 if isinstance(resp, dict) and resp.get("ok") and resp.get("message_id"):
-                    _mark_bot_message(resp.get("message_id"))
-                    print(f"Stored outgoing bot message id={resp.get('message_id')}")
+                    mid = resp.get("message_id")
+                    _mark_bot_message(mid)
+                    # Also mark outgoing message as processed so webhooks about it are ignored
+                    _mark_processed(mid)
+                    print(f"Stored outgoing bot message id={mid} and marked processed")
                 else:
                     print(f"No outgoing message id returned or send failed for to={user_phone_arg} resp={resp}")
             except Exception as exc:
@@ -368,20 +371,21 @@ def build_whatsapp_messages(api_response):
             }
 
         structured = _extract_match_structured(match)
-        # Only keep available values (skip None/empty)
-        pruned = _prune_none(structured) or {}
 
         # Persist the bot match into conversation thread (best-effort)
         try:
             message_doc = {
-                "message_id": pruned.get("message_id") or f"bot_match_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
+                "message_id": structured.get("message_id") or f"bot_match_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
                 "type": "bot_match",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "text": msg,
-                "match": pruned,
+                "match": structured,
             }
-            target_phone = pruned.get("phone_number") or api_response.get("phone_number") or "unknown"
-            upsert_conversation_message(target_phone, message_doc)
+            if structured.get("phone_number"):
+                upsert_conversation_message(structured.get("phone_number"), message_doc)
+            else:
+                # fallback: attach to buyer's phone if present in api_response
+                upsert_conversation_message(api_response.get("phone_number") or "unknown", message_doc)
         except Exception as exc:
             print(f"Failed to persist match to conversation store: {exc}")
 
@@ -442,33 +446,6 @@ def _contact_to_extraction_text(contact: dict) -> str:
         f"Website: {website}\n"
         f"Address: {address}"
     )
-
-
-def _prune_none(obj):
-    """Recursively remove keys with None or empty dict/list values.
-
-    Returns pruned object or None if nothing remains.
-    """
-    if isinstance(obj, dict):
-        new = {}
-        for k, v in obj.items():
-            pv = _prune_none(v)
-            if pv is None:
-                continue
-            # skip empty containers
-            if pv == {} or pv == []:
-                continue
-            new[k] = pv
-        return new if new else None
-    if isinstance(obj, list):
-        new_list = []
-        for item in obj:
-            pi = _prune_none(item)
-            if pi is None:
-                continue
-            new_list.append(pi)
-        return new_list if new_list else None
-    return obj
 
 
 @app.get("/webhook")
