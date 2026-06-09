@@ -26,7 +26,8 @@ class ExternalApiService:
             logger.info(
                 f"Sending text to API: "
                 f"message_id={message_id}, "
-                f"phone_number={phone_number}"
+                f"phone_number={phone_number}, "
+                f"raw_message={text}"
             )
 
             resp = requests.post(
@@ -119,7 +120,8 @@ class ExternalApiService:
                 f"Sending media: "
                 f"message_id={message_id}, "
                 f"phone_number={phone_number}, "
-                f"filename={filename}"
+                f"filename={filename}, "
+                f"raw_message={raw_message}"
             )
 
             resp = requests.post(
