@@ -308,6 +308,8 @@ def is_forwarded_message(message: dict) -> bool:
         or context.get("frequently_forwarded", False)
     )
 
+from datetime import datetime, timezone
+
 def build_whatsapp_messages(api_response):
 
     matches = api_response.get("matches", [])
@@ -318,7 +320,7 @@ def build_whatsapp_messages(api_response):
             "message_id": api_response.get("message_id"),
             "text": api_response.get(
                 "reply_message",
-                "❌ No matching buyers found."
+                "❌ No matching properties found."
             )
         }]
 
@@ -326,77 +328,179 @@ def build_whatsapp_messages(api_response):
 
     for idx, match in enumerate(matches[:10], start=1):
 
-        buyer = match.get("buy_snapshot", match.get("sell_snapshot", {} ))
-        broker = match.get("buy_broker", match.get("sell_broker", {}))
+        match_type = match.get("match_type")
 
-        msg = (
-            f"🎯 Buyer Match #{idx}\n\n"
-            f"🏠 {buyer.get('bhk') or 0} BR "
-            f"{buyer.get('price_aed') or 0:,} AED\n"
-            f"{buyer.get('property_type', 'Property').title()}\n"
-            f"📍 {buyer.get('location', 'N/A')}\n"
-            f"📞 {broker.get('phone', 'N/A')}"
+        target_phone = (
+            match.get("phone_number")
+            or api_response.get("phone_number")
         )
 
-        # Extract structured match data to store/forward
-        def _extract_match_structured(m: dict) -> dict:
-            sell_snapshot = (m.get("sell_snapshot") or {}) if isinstance(m.get("sell_snapshot"), dict) else {}
-            sell_broker = (m.get("sell_broker") or {}) if isinstance(m.get("sell_broker"), dict) else {}
-            return {
-                "match_type": m.get("match_type"),
-                "match_id": m.get("match_id"),
-                "buy_id": m.get("buy_id"),
-                "sell_id": m.get("sell_id"),
-                "score": m.get("score"),
-                "reasons": m.get("reasons") or [],
-                "skipped": m.get("skipped") or [],
-                "sell_broker": {
-                    "name": sell_broker.get("name"),
-                    "phone": sell_broker.get("phone"),
-                    "company": sell_broker.get("company"),
-                },
-                "sell_snapshot": {
-                    "property_type": sell_snapshot.get("property_type"),
-                    "bhk": sell_snapshot.get("bhk"),
-                    "price_aed": sell_snapshot.get("price_aed"),
-                    "location": sell_snapshot.get("location"),
-                    "wa_message_id": sell_snapshot.get("wa_message_id"),
-                    "wa_phone_number": sell_snapshot.get("wa_phone_number"),
-                    "wa_received_at": sell_snapshot.get("wa_received_at"),
-                    "customer_message": sell_snapshot.get("customer_message"),
-                },
-                "message_id": m.get("message_id"),
-                "phone_number": m.get("phone_number"),
-                "matched_listing_received_at": m.get("matched_listing_received_at"),
-            }
+        target_message_id = (
+            match.get("message_id")
+            or api_response.get("message_id")
+        )
 
-        structured = _extract_match_structured(match)
+        # -----------------------------------
+        # PROJECT MATCH
+        # -----------------------------------
+        if match_type == "project":
 
-        # Persist the bot match into conversation thread (best-effort)
+            bedrooms = ", ".join(
+                f"{b}BR"
+                for b in match.get(
+                    "bedrooms_available",
+                    []
+                )
+            )
+
+            msg = (
+                f"🏗️ *New Project Match Found*\n\n"
+                f"📌 {match.get('project_name')}\n"
+                f"🏢 Developer: {match.get('developer')}\n"
+                f"📍 Location: {match.get('area')}\n\n"
+                f"💰 Starting Price: AED {int(match.get('starting_price', 0)):,}\n"
+                f"🛏️ Available Units: {bedrooms}\n"
+                f"💳 Payment Plan: {match.get('payment_plan') or 'N/A'}\n"
+            )
+
+            if match.get("handover"):
+                msg += f"🏗️ Handover: {match.get('handover')}\n"
+
+            if match.get("youtube_link"):
+                msg += (
+                    f"\n🎥 Video:\n"
+                    f"{match.get('youtube_link')}"
+                )
+
+            if match.get("pdf_link"):
+                msg += (
+                    f"\n\n📄 Brochure:\n"
+                    f"{match.get('pdf_link')}"
+                )
+
+        # -----------------------------------
+        # BROKER SELL MATCH
+        # -----------------------------------
+        elif match_type == "broker_sell":
+
+            property_info = match.get(
+                "sell_snapshot",
+                {}
+            )
+
+            broker = match.get(
+                "sell_broker",
+                {}
+            )
+
+            score = int(
+                match.get("score", 0) * 100
+            )
+
+            msg = (
+                f"🎯 *Property Match Found*\n\n"
+                f"🏠 {property_info.get('bhk', 'N/A')} BR "
+                f"{property_info.get('property_type', 'Property').title()}\n"
+                f"📍 {property_info.get('location', 'N/A')}\n"
+                f"💰 AED {property_info.get('price_aed', 0):,}\n\n"
+                f"👤 Broker: {broker.get('name') or 'N/A'}\n"
+                f"📞 {broker.get('phone') or 'N/A'}\n\n"
+                f"⭐ Match Score: {score}%"
+            )
+
+        # -----------------------------------
+        # BROKER BUY MATCH
+        # -----------------------------------
+        elif match_type == "broker_buy":
+
+            buyer = match.get(
+                "buy_snapshot",
+                {}
+            )
+
+            broker = match.get(
+                "buy_broker",
+                {}
+            )
+
+            score = int(
+                match.get("score", 0) * 100
+            )
+
+            budget = "N/A"
+
+            if (
+                buyer.get("price_min_aed")
+                and buyer.get("price_max_aed")
+            ):
+                budget = (
+                    f"AED {buyer['price_min_aed']:,}"
+                    f" - "
+                    f"AED {buyer['price_max_aed']:,}"
+                )
+            elif buyer.get("price_aed"):
+                budget = (
+                    f"AED {buyer['price_aed']:,}"
+                )
+
+            msg = (
+                f"🎯 *Buyer Match Found*\n\n"
+                f"🏠 Looking For: "
+                f"{buyer.get('bhk', 'N/A')} BR "
+                f"{buyer.get('property_type', 'Property').title()}\n"
+                f"📍 Preferred Area: "
+                f"{buyer.get('location', 'N/A')}\n"
+                f"💰 Budget: {budget}\n\n"
+                f"👤 Broker: "
+                f"{broker.get('name') or 'N/A'}\n"
+                f"📞 {broker.get('phone') or 'N/A'}\n\n"
+                f"⭐ Match Score: {score}%"
+            )
+
+        else:
+
+            msg = (
+                api_response.get(
+                    "reply_message",
+                    "Match Found"
+                )
+            )
+
+        # -----------------------------------
+        # SAVE MATCH DETAILS
+        # -----------------------------------
+
         try:
+
             message_doc = {
-                "message_id": structured.get("message_id") or f"bot_match_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
+                "message_id":
+                    target_message_id
+                    or f"bot_match_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
                 "type": "bot_match",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp":
+                    datetime.now(timezone.utc).isoformat(),
                 "text": msg,
-                "match": structured,
+                "match": match,
             }
-            if structured.get("phone_number"):
-                upsert_conversation_message(structured.get("phone_number"), message_doc)
-            else:
-                # fallback: attach to buyer's phone if present in api_response
-                upsert_conversation_message(api_response.get("phone_number") or "unknown", message_doc)
+
+            upsert_conversation_message(
+                target_phone or "unknown",
+                message_doc
+            )
+
         except Exception as exc:
-            print(f"Failed to persist match to conversation store: {exc}")
+            print(
+                f"Failed to persist match: {exc}"
+            )
 
         messages.append({
-            "phone_number": match.get("phone_number"),
-            "message_id": match.get("message_id"),
+            "phone_number": target_phone,
+            "message_id": target_message_id,
             "text": msg,
+            "match_type": match_type
         })
 
     return messages
-
 
 def _is_ignored_phone(incoming_phone_id: Optional[str]) -> bool:
     return bool(PHONE_NUMBER_ID and incoming_phone_id != PHONE_NUMBER_ID)
