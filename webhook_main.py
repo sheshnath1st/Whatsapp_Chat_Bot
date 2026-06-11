@@ -204,7 +204,7 @@ def _process_incoming_messages(
 
         try:
             # Reply to a bot message -> call update_message_tag and stop processing (only if not forwarded)
-            if context_id and not forwarded_flag and _is_bot_message(context_id):
+            if context_id and not _is_bot_message(context_id):
                 print(f"Incoming message is a reply to bot message: context_id={context_id} incoming_id={incoming_message_id}")
                 try:
                     api_result = ExternalApiService.update_message_tag(message_id=context_id, tag=(user_message or ""))

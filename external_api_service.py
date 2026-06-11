@@ -17,6 +17,11 @@ class ExternalApiService:
             "phone_number": (None, str(phone_number)),
             "raw_message": (None, text)
         }
+        data = {
+            "message_id": str(message_id),
+            "phone_number": str(phone_number),
+            "raw_message": text
+        }
 
         headers = {
             "X-API-Key": API_KEY
@@ -33,12 +38,15 @@ class ExternalApiService:
             resp = requests.post(
                 API_URL,
                 headers=headers,
-                files=files,
+                # files=files,
+                data=data,
                 timeout=120
             )
 
-            logger.info(f"API response: {resp.status_code}")
-            logger.info(f"API response body: {resp.text}")
+            logger.info("===== API RESPONSE =====")
+            logger.info(f"Status Code: {resp.status_code}")
+            logger.info(f"Headers: {dict(resp.headers)}")
+            logger.info(f"Body: {resp.text}")
 
             if resp.status_code == 200:
                 api_data = (
@@ -82,8 +90,10 @@ class ExternalApiService:
                 timeout=120
             )
 
-            logger.info(f"Update status: {resp.status_code}")
-            logger.info(f"Update response: {resp.text}")
+            logger.info("===== UPDATE API RESPONSE =====")
+            logger.info(f"Status Code: {resp.status_code}")
+            logger.info(f"Headers: {dict(resp.headers)}")
+            logger.info(f"Body: {resp.text}")
 
             if resp.status_code == 200:
                 return resp.json()
