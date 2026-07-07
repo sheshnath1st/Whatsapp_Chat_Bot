@@ -409,7 +409,7 @@ def build_whatsapp_messages(api_response):
         # BROKER SELL MATCH
         # -----------------------------------
         elif match_type == "broker_sell":
-
+            print(f"Processing broker_sell match: {match}")
             property_info = match.get(
                 "sell_snapshot",
                 {}
@@ -439,7 +439,7 @@ def build_whatsapp_messages(api_response):
         # BROKER BUY MATCH
         # -----------------------------------
         elif match_type == "broker_buy":
-
+            print(f"Processing broker_buy match: {match}")
             buyer = match.get(
                 "buy_snapshot",
                 {}
@@ -474,7 +474,7 @@ def build_whatsapp_messages(api_response):
                 f"🎯 *Buyer Match Found*\n\n"
                 f"🏠 Looking For: "
                 f"{buyer.get('bhk', 'N/A')} BR "
-                f"{buyer.get('property_type', 'Property').title()}\n"
+                f"{buyer.get('property_type', 'Property')}\n"
                 f"📍 Preferred Area: "
                 f"{buyer.get('location', 'N/A')}\n"
                 f"💰 Budget: {budget}\n\n"
@@ -485,14 +485,14 @@ def build_whatsapp_messages(api_response):
             )
 
         else:
-
+            print(f"Unknown match_type: {match_type} for match: {match}")
             msg = (
                 api_response.get(
                     "reply_message",
                     "Match Found"
                 )
             )
-
+        print(f"Constructed message for match_type={match_type}: {msg}")
         # -----------------------------------
         # SAVE MATCH DETAILS
         # -----------------------------------
