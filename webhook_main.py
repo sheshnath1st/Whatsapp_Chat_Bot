@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from webhook_utils import llm_reply_to_text_v2
+from project_interactive import send_project_interactive_message, build_project_buttons, handle_project_button_click
 from conversation_store import log_event, log_failure
 from media_store import upload_whatsapp_media_to_s3
 import logging
@@ -54,6 +55,7 @@ from conversation_store import (
 )
 from datetime import datetime, timezone
 import threading
+import asyncio
 
 # In-memory caches. Replace with Redis or persistent store in production.
 PROCESSED_MESSAGES = set()
@@ -217,6 +219,18 @@ def _process_incoming_messages(
                 continue
 
             # Normal processing: forwarded messages fall through here as normal inquiries
+            # Handle interactive button/list replies
+            if message.get("type") == "interactive":
+                # Route interactive actions (button_reply or list_reply)
+                try:
+                    logger.info("Received interactive incoming message: %s", message)
+                    handle_project_button_click(message, user_phone, incoming_message_id)
+                except Exception as exc:
+                    logger.exception("Error handling interactive message: %s", exc)
+                _mark_processed(incoming_message_id)
+                handled_messages += 1
+                continue
+
             if kind == "text" or kind is None:
                 print(f"Calling ExternalApiService.send_text for incoming_id={incoming_message_id}")
                 reply_text = ExternalApiService.send_text(user_message, incoming_message_id, user_phone)
@@ -287,6 +301,19 @@ def _process_incoming_messages(
 
         loop = asyncio.get_event_loop()
         for reply_message in reply_messages:
+
+            # If this is a project match, send interactive message instead of text
+            if reply_message.get("match_type") == "project":
+                project = reply_message.get("project_data")
+                logger.info("Project match detected for phone=%s project=%s", reply_message.get("phone_number"), project.get("project_name"))
+                loop.create_task(
+                    send_project_message_async(
+                        reply_message["phone_number"],
+                        project
+                    )
+                )
+                continue
+
             target_phone = reply_message.get("phone_number") or user_phone
             target_text = reply_message.get("text")
             target_message_id = reply_message.get("message_id") or incoming_message_id
@@ -400,7 +427,7 @@ def build_whatsapp_messages(api_response):
             msg = (
                 f"🎯 *Property Match Found*\n\n"
                 f"🏠 {property_info.get('bhk', 'N/A')} BR "
-                f"{property_info.get('property_type', 'Property').title()}\n"
+                f"{property_info.get('property_type', 'Property')}\n"
                 f"📍 {property_info.get('location', 'N/A')}\n"
                 f"💰 AED {property_info.get('price_aed', 0):,}\n\n"
                 f"👤 Broker: {broker.get('name') or 'N/A'}\n"
@@ -497,7 +524,8 @@ def build_whatsapp_messages(api_response):
             "phone_number": target_phone,
             "message_id": target_message_id,
             "text": msg,
-            "match_type": match_type
+            "match_type": match_type,
+            "project_data": match
         })
 
     return messages
@@ -584,6 +612,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse(status_code=200, content=resp_content)
 
     try:
+        logger.info("============================================== Received webhook Data ==============================================")
         logger.info("Received webhook data: %s", json.dumps(data))
         message_data = WhatsAppMessage(**data)
 
@@ -646,3 +675,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         resp_content = {"status": "error"}
         logger.info("Webhook handler unhandled exception; response=%s", resp_content)
         return JSONResponse(status_code=200, content=resp_content)
+    
+    async def send_project_message_async(phone, project):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, send_project_interactive_message, phone, project)
