@@ -233,38 +233,5 @@ def handle_project_button_click(message: dict, user_phone: str, incoming_message
     except Exception as exc:
         logger.exception("Error handling project button click: %s", exc)
         log_failure(source="project_interactive.handle_click", error=str(exc), phone=user_phone, message_id=incoming_message_id)
-def build_project_buttons(project):
-
-    buttons = []
-
-    if project.get("pdf_link"):
-        buttons.append({
-            "id": f"brochure_{project['project_id']}",
-            "title": "📄 Brochure"
-        })
-
-    if project.get("youtube_link"):
-        buttons.append({
-            "id": f"video_{project['project_id']}",
-            "title": "🎥 Video"
-        })
-
-    if project.get("image_link"):
-        buttons.append({
-            "id": f"gallery_{project['project_id']}",
-            "title": "🖼 Gallery"
-        })
-
-    buttons.append({
-        "id": f"interested_{project['project_id']}",
-        "title": "👍 Interested"
-    })
-
-    buttons.append({
-        "id": f"callback_{project['project_id']}",
-        "title": "📞 Callback"
-    })
-
-    return buttons
 
 
