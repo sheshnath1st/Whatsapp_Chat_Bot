@@ -676,6 +676,6 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
         logger.info("Webhook handler unhandled exception; response=%s", resp_content)
         return JSONResponse(status_code=200, content=resp_content)
     
-    async def send_project_message_async(phone, project):
+async def send_project_message_async(phone, project):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, send_project_interactive_message, phone, project)
