@@ -280,18 +280,17 @@ def _process_incoming_messages(
         else:
             reply_messages = build_whatsapp_messages(reply_text)
 
-        # Async send wrapper to store outgoing message ids
-        from webhook_utils import send_message_async
-        import asyncio
+        # Send messages using background tasks
+        from webhook_utils import send_message_async, send_message
 
-        async def _send_and_store(user_phone_arg, text_arg, reply_to_id_arg=None):
+        def _send_text_sync(user_phone_arg, text_arg, reply_to_id_arg=None):
+            """Synchronous wrapper to send message using sync function."""
             try:
-                resp = await send_message_async(user_phone_arg, text_arg, reply_to_id_arg)
-                print(f"send_message_async result for to={user_phone_arg} resp={resp}")
-                if isinstance(resp, dict) and resp.get("ok") and resp.get("message_id"):
+                resp = send_message(user_phone_arg, text_arg, reply_to_id_arg)
+                print(f"send_message result for to={user_phone_arg} resp={resp}")
+                if isinstance(resp, dict) and resp.get("message_id"):
                     mid = resp.get("message_id")
                     _mark_bot_message(mid)
-                    # Also mark outgoing message as processed so webhooks about it are ignored
                     _mark_processed(mid)
                     print(f"Stored outgoing bot message id={mid} and marked processed")
                 else:
@@ -299,26 +298,27 @@ def _process_incoming_messages(
             except Exception as exc:
                 print(f"Exception while sending message to {user_phone_arg}: {exc}")
 
-        loop = asyncio.get_event_loop()
+        async def _send_project_message_bg(phone_arg, project_arg):
+            """Background task to send project interactive message."""
+            try:
+                await send_project_message_async(phone_arg, project_arg)
+            except Exception as exc:
+                logger.exception("Error sending project message in background: %s", exc)
+
         for reply_message in reply_messages:
 
             # If this is a project match, send interactive message instead of text
             if reply_message.get("match_type") == "project":
                 project = reply_message.get("project_data")
                 logger.info("Project match detected for phone=%s project=%s", reply_message.get("phone_number"), project.get("project_name"))
-                loop.create_task(
-                    send_project_message_async(
-                        reply_message["phone_number"],
-                        project
-                    )
-                )
+                background_tasks.add_task(_send_project_message_bg, reply_message["phone_number"], project)
                 continue
 
             target_phone = reply_message.get("phone_number") or user_phone
             target_text = reply_message.get("text")
             target_message_id = reply_message.get("message_id") or incoming_message_id
             print(f"Scheduling reply to {target_phone} message_id={target_message_id} text={target_text}")
-            loop.create_task(_send_and_store(target_phone, target_text, target_message_id))
+            background_tasks.add_task(_send_text_sync, target_phone, target_text, target_message_id)
 
         # Mark processed to prevent duplicate processing
         _mark_processed(incoming_message_id)
