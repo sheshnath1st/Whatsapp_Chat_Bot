@@ -353,7 +353,7 @@ def build_whatsapp_messages(api_response):
 
     messages = []
 
-    for idx, match in enumerate(matches[:10], start=1):
+    for idx, match in enumerate(matches, start=1):
 
         match_type = match.get("match_type")
 
