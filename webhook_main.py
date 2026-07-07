@@ -280,6 +280,8 @@ def _process_incoming_messages(
         else:
             reply_messages = build_whatsapp_messages(reply_text)
 
+        print(f"Generated reply_messages: {reply_messages}")
+
         # Send messages using background tasks
         from webhook_utils import send_message_async, send_message
 
@@ -318,7 +320,12 @@ def _process_incoming_messages(
             target_text = reply_message.get("text")
             target_message_id = reply_message.get("message_id") or incoming_message_id
             print(f"Scheduling reply to {target_phone} message_id={target_message_id} text={target_text}")
-            background_tasks.add_task(_send_text_sync, target_phone, target_text, target_message_id)
+
+            if reply_message.get("match_type") in {"broker_sell", "broker_buy"}:
+                # Send broker matches immediately so they are not delayed or dropped by background job scheduling.
+                _send_text_sync(target_phone, target_text, target_message_id)
+            else:
+                background_tasks.add_task(_send_text_sync, target_phone, target_text, target_message_id)
 
         # Mark processed to prevent duplicate processing
         _mark_processed(incoming_message_id)
