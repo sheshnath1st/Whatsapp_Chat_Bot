@@ -308,7 +308,7 @@ def _process_incoming_messages(
         for reply_message in reply_messages:
 
             # If this is a project match, send interactive message instead of text
-            if reply_message.get("match_type") == "project" or reply_message.get("match_type") == "broker_sell":
+            if reply_message.get("match_type") == "project":
                 project = reply_message.get("project_data")
                 logger.info("Project match detected for phone=%s project=%s", reply_message.get("phone_number"), project.get("project_name"))
                 background_tasks.add_task(_send_project_message_bg, reply_message["phone_number"], project)
