@@ -34,7 +34,7 @@ def build_project_buttons(project: dict) -> Tuple[str, List[dict]]:
     buttons.append({"id": f"callback_{pid}", "title": "📞 Request Callback"})
 
     mode = "buttons" if len(buttons) <= 3 else "list"
-    logger.info("Buttons generated for project %s: mode=%s buttons=%s", pid, mode, buttons)
+    # logger.info("Buttons generated for project %s: mode=%s buttons=%s", pid, mode, buttons)
     return mode, buttons
 
 

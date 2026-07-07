@@ -613,7 +613,7 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
     try:
         logger.info("============================================== Received webhook Data ==============================================")
-        logger.info("Received webhook data: %s", json.dumps(data))
+        # logger.info("Received webhook data: %s", json.dumps(data))
         message_data = WhatsAppMessage(**data)
 
         if not message_data.entry:
@@ -640,8 +640,8 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
                 if "messages" not in change:
                     print("❌ Ignored non-message event")
                     continue
-                print(f"✅ Processing webhook for phone_number_id: {incoming_phone_id}")
-                print(f"Webhook change content: {json.dumps(change)}")
+                # print(f"✅ Processing webhook for phone_number_id: {incoming_phone_id}")
+                # print(f"Webhook change content: {json.dumps(change)}")
                 handled_statuses += _log_status_events(change, incoming_phone_id)
                 handled_messages += _process_incoming_messages(
                     change=change,
@@ -652,16 +652,15 @@ async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
 
         if handled_messages == 0 and handled_statuses == 0:
             resp_content = {"status": "no_relevant_event"}
-            logger.info(
-                "Webhook processed but no relevant events; handled_messages=%d handled_statuses=%d response=%s",
-                handled_messages,
-                handled_statuses,
-                resp_content,
-            )
+            # logger.info("Webhook processed but no relevant events; handled_messages=%d handled_statuses=%d response=%s",
+            #     handled_messages,
+            #     handled_statuses,
+            #     resp_content,
+            # )
             return JSONResponse(status_code=200, content=resp_content)
 
         resp_content = {"status": "ok", "handled_messages": handled_messages, "handled_statuses": handled_statuses}
-        logger.info("Webhook processed successfully; response=%s", resp_content)
+        # logger.info("Webhook processed successfully; response=%s", resp_content)
         return JSONResponse(status_code=200, content=resp_content)
 
     except Exception as exc:
